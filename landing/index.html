@@ -1201,17 +1201,20 @@
                 <div class="code-tab active">Terminal</div>
             </div>
             <div class="code-content">
-                <div class="code-line"><span class="code-comment"># Store an API credential</span></div>
+                <div class="code-line"><span class="code-comment"># Initialize and store a credential</span></div>
+                <div class="code-line"><span class="code-cmd">vultrino</span> <span class="code-arg">init</span></div>
                 <div class="code-line"><span class="code-cmd">vultrino</span> <span class="code-arg">add</span> --alias github --key <span class="code-string">ghp_xxx</span></div>
                 <div class="code-line">&nbsp;</div>
-                <div class="code-line"><span class="code-comment"># Make authenticated requests</span></div>
-                <div class="code-line"><span class="code-cmd">vultrino</span> <span class="code-arg">request</span> github <span class="code-string">https://api.github.com/user</span></div>
+                <div class="code-line"><span class="code-comment"># Start server and create a scoped API key</span></div>
+                <div class="code-line"><span class="code-cmd">vultrino</span> <span class="code-arg">web</span> &</div>
+                <div class="code-line"><span class="code-cmd">vultrino</span> <span class="code-arg">key create</span> my-agent --role executor</div>
+                <div class="code-line"><span class="code-comment"># → vk_a1b2c3...</span></div>
                 <div class="code-line">&nbsp;</div>
-                <div class="code-line"><span class="code-comment"># Use plugin actions (e.g., PGP signing)</span></div>
-                <div class="code-line"><span class="code-cmd">vultrino</span> <span class="code-arg">action</span> my-pgp pgp-signing.sign</div>
+                <div class="code-line"><span class="code-comment"># Use API key (no password needed!)</span></div>
+                <div class="code-line"><span class="code-cmd">vultrino</span> --key <span class="code-string">vk_a1b2c3...</span> <span class="code-arg">request</span> github <span class="code-string">https://api.github.com/user</span></div>
                 <div class="code-line">&nbsp;</div>
-                <div class="code-line"><span class="code-comment"># Connect AI agents via MCP</span></div>
-                <div class="code-line"><span class="code-cmd">vultrino</span> <span class="code-arg">serve</span> --mcp</div>
+                <div class="code-line"><span class="code-comment"># Or connect AI agents via MCP</span></div>
+                <div class="code-line"><span class="code-cmd">vultrino</span> <span class="code-arg">mcp</span></div>
             </div>
         </div>
     </section>

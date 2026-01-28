@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "vultrino": {
+      "command": "vultrino",
+      "args": ["mcp"],
+      "env": {
+        "VULTRINO_PASSWORD": "your-storage-password"
+      }
+    }
+  }
+}
