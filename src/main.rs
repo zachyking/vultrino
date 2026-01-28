@@ -372,19 +372,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         } => {
             add_credential(
                 config,
-                alias,
-                r#type,
-                description,
-                key,
-                username,
-                password,
-                header_name,
-                header_prefix,
-                client_id,
-                client_secret,
-                token_url,
-                scopes,
-                refresh_token,
+                AddCredentialArgs {
+                    alias,
+                    cred_type: r#type,
+                    description,
+                    key,
+                    header_name,
+                    header_prefix,
+                    username,
+                    password,
+                    client_id,
+                    client_secret,
+                    token_url,
+                    scopes,
+                    refresh_token,
+                },
             )
             .await?;
         }
@@ -641,38 +643,46 @@ async fn save_admin_auth(admin_auth: &AdminAuth) -> Result<(), Box<dyn std::erro
     Ok(())
 }
 
-/// Add a new credential
-async fn add_credential(
-    config: Config,
+/// Arguments for adding a credential
+struct AddCredentialArgs {
     alias: String,
     cred_type: String,
     description: Option<String>,
+    // API Key fields
     key: Option<String>,
-    username: Option<String>,
-    password: Option<String>,
     header_name: String,
     header_prefix: String,
+    // Basic Auth fields
+    username: Option<String>,
+    password: Option<String>,
+    // OAuth2 fields
     client_id: Option<String>,
     client_secret: Option<String>,
     token_url: Option<String>,
     scopes: Option<String>,
     refresh_token: Option<String>,
+}
+
+/// Add a new credential
+async fn add_credential(
+    config: Config,
+    args: AddCredentialArgs,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let storage = init_storage(&config).await?;
 
     // Build credential data based on type
-    let data = match cred_type.as_str() {
+    let data = match args.cred_type.as_str() {
         "api_key" => {
-            let key = key.ok_or("API key is required (--key)")?;
+            let key = args.key.ok_or("API key is required (--key)")?;
             CredentialData::ApiKey {
                 key: Secret::new(key),
-                header_name,
-                header_prefix,
+                header_name: args.header_name,
+                header_prefix: args.header_prefix,
             }
         }
         "basic_auth" => {
-            let username = username.ok_or("Username is required (--username)")?;
-            let password = if let Some(p) = password {
+            let username = args.username.ok_or("Username is required (--username)")?;
+            let password = if let Some(p) = args.password {
                 p
             } else {
                 eprint!("Enter password: ");
@@ -685,15 +695,15 @@ async fn add_credential(
             }
         }
         "oauth2" => {
-            let client_id = client_id.ok_or("Client ID is required (--client-id)")?;
-            let token_url = token_url.ok_or("Token URL is required (--token-url)")?;
+            let client_id = args.client_id.ok_or("Client ID is required (--client-id)")?;
+            let token_url = args.token_url.ok_or("Token URL is required (--token-url)")?;
 
             // Validate token URL is HTTPS
             if !token_url.starts_with("https://") {
                 return Err("Token URL must use HTTPS for security".into());
             }
 
-            let client_secret = if let Some(s) = client_secret {
+            let client_secret = if let Some(s) = args.client_secret {
                 s
             } else {
                 eprint!("Enter client secret: ");
@@ -702,14 +712,14 @@ async fn add_credential(
             };
 
             // Parse scopes
-            let scopes_vec: Vec<String> = scopes
+            let scopes_vec: Vec<String> = args.scopes
                 .map(|s| s.split(',').map(|p| p.trim().to_string()).filter(|s| !s.is_empty()).collect())
                 .unwrap_or_default();
 
             CredentialData::OAuth2 {
                 client_id,
                 client_secret: Secret::new(client_secret),
-                refresh_token: refresh_token.map(Secret::new),
+                refresh_token: args.refresh_token.map(Secret::new),
                 access_token: None,
                 expires_at: None,
                 token_url,
@@ -722,14 +732,14 @@ async fn add_credential(
     };
 
     // Create and store credential
-    let mut credential = Credential::new(alias.clone(), data);
-    if let Some(desc) = description {
+    let mut credential = Credential::new(args.alias.clone(), data);
+    if let Some(desc) = args.description {
         credential = credential.with_metadata("description", desc);
     }
 
     storage.store(&credential).await?;
 
-    println!("Credential '{}' added successfully", alias);
+    println!("Credential '{}' added successfully", args.alias);
     println!("ID: {}", credential.id);
 
     Ok(())
