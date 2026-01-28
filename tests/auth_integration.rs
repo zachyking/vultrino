@@ -2,8 +2,8 @@
 //!
 //! Tests the full flow: storage -> auth manager -> API validation
 
+use chrono::{Duration, Utc};
 use secrecy::SecretString;
-use std::collections::HashSet;
 use tempfile::tempdir;
 use vultrino::auth::{AuthManager, Permission, ROLE_ADMIN, ROLE_EXECUTOR, ROLE_READ_ONLY};
 use vultrino::storage::{FileStorage, StorageBackend};
@@ -310,4 +310,199 @@ async fn test_multiple_scoped_keys() {
     let (_, aws_validated) = manager.validate_key(&aws_key).unwrap();
     assert!(aws_validated.can_access_credential("aws-prod"));
     assert!(!aws_validated.can_access_credential("github-api"));
+}
+
+// ============== OAuth2 Credential Tests ==============
+
+/// Test OAuth2 credential storage and retrieval
+#[tokio::test]
+async fn test_oauth2_credential_storage() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("test.enc");
+    let password = SecretString::from("test-password");
+
+    let storage = FileStorage::new(&path, &password).await.unwrap();
+
+    // Store an OAuth2 credential
+    let cred = Credential::new(
+        "oauth2-api".to_string(),
+        CredentialData::OAuth2 {
+            client_id: "test-client-id".to_string(),
+            client_secret: Secret::new("test-client-secret"),
+            refresh_token: Some(Secret::new("test-refresh-token")),
+            access_token: None,
+            expires_at: None,
+            token_url: "https://oauth.example.com/token".to_string(),
+            scopes: vec!["read".to_string(), "write".to_string()],
+        },
+    )
+    .with_metadata("description", "OAuth2 API credential");
+
+    storage.store(&cred).await.unwrap();
+
+    // List credentials (returns metadata only)
+    let credentials = storage.list().await.unwrap();
+    assert_eq!(credentials.len(), 1);
+    assert_eq!(credentials[0].alias, "oauth2-api");
+
+    // Get full credential by alias
+    let retrieved = storage.get_by_alias("oauth2-api").await.unwrap().unwrap();
+
+    // Verify credential type
+    match &retrieved.data {
+        CredentialData::OAuth2 {
+            client_id,
+            scopes,
+            token_url,
+            ..
+        } => {
+            assert_eq!(client_id, "test-client-id");
+            assert_eq!(scopes, &vec!["read".to_string(), "write".to_string()]);
+            assert_eq!(token_url, "https://oauth.example.com/token");
+        }
+        _ => panic!("Expected OAuth2 credential"),
+    }
+}
+
+/// Test OAuth2 credential with access token and expiration
+#[tokio::test]
+async fn test_oauth2_credential_with_token() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("test.enc");
+    let password = SecretString::from("test-password");
+
+    let storage = FileStorage::new(&path, &password).await.unwrap();
+
+    // Create credential with access token that expires in 1 hour
+    let expires_at = Utc::now() + Duration::hours(1);
+    let cred = Credential::new(
+        "oauth2-with-token".to_string(),
+        CredentialData::OAuth2 {
+            client_id: "client-123".to_string(),
+            client_secret: Secret::new("secret-456"),
+            refresh_token: None,
+            access_token: Some(Secret::new("access-token-789")),
+            expires_at: Some(expires_at),
+            token_url: "https://oauth.example.com/token".to_string(),
+            scopes: vec![],
+        },
+    );
+
+    storage.store(&cred).await.unwrap();
+
+    // Retrieve and verify
+    let retrieved = storage.get_by_alias("oauth2-with-token").await.unwrap().unwrap();
+    match &retrieved.data {
+        CredentialData::OAuth2 {
+            access_token,
+            expires_at: stored_expires,
+            ..
+        } => {
+            assert!(access_token.is_some());
+            assert!(stored_expires.is_some());
+            // Expiration time should be approximately what we set
+            let diff = stored_expires.unwrap() - expires_at;
+            assert!(diff.num_seconds().abs() < 2);
+        }
+        _ => panic!("Expected OAuth2 credential"),
+    }
+}
+
+/// Test OAuth2 credential update (simulating token refresh)
+#[tokio::test]
+async fn test_oauth2_credential_update_after_refresh() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("test.enc");
+    let password = SecretString::from("test-password");
+
+    let storage = FileStorage::new(&path, &password).await.unwrap();
+
+    // Create initial credential without access token
+    let cred = Credential::new(
+        "oauth2-refresh-test".to_string(),
+        CredentialData::OAuth2 {
+            client_id: "client-id".to_string(),
+            client_secret: Secret::new("client-secret"),
+            refresh_token: Some(Secret::new("refresh-token")),
+            access_token: None,
+            expires_at: None,
+            token_url: "https://oauth.example.com/token".to_string(),
+            scopes: vec!["api".to_string()],
+        },
+    );
+
+    storage.store(&cred).await.unwrap();
+
+    // Simulate token refresh by updating the credential
+    let new_expires = Utc::now() + Duration::hours(1);
+    let updated_cred = Credential {
+        id: cred.id.clone(),
+        alias: cred.alias.clone(),
+        credential_type: cred.credential_type,
+        data: CredentialData::OAuth2 {
+            client_id: "client-id".to_string(),
+            client_secret: Secret::new("client-secret"),
+            refresh_token: Some(Secret::new("new-refresh-token")), // Rotated
+            access_token: Some(Secret::new("new-access-token")),
+            expires_at: Some(new_expires),
+            token_url: "https://oauth.example.com/token".to_string(),
+            scopes: vec!["api".to_string()],
+        },
+        metadata: cred.metadata.clone(),
+        created_at: cred.created_at,
+        updated_at: Utc::now(),
+    };
+
+    storage.store(&updated_cred).await.unwrap();
+
+    // Verify only one credential exists (update, not duplicate)
+    let credentials = storage.list().await.unwrap();
+    assert_eq!(credentials.len(), 1);
+
+    // Verify the credential was updated
+    let retrieved = storage.get_by_alias("oauth2-refresh-test").await.unwrap().unwrap();
+    match &retrieved.data {
+        CredentialData::OAuth2 {
+            access_token,
+            refresh_token,
+            expires_at,
+            ..
+        } => {
+            assert!(access_token.is_some());
+            assert!(refresh_token.is_some());
+            assert!(expires_at.is_some());
+        }
+        _ => panic!("Expected OAuth2 credential"),
+    }
+}
+
+/// Test OAuth2 credential scoped access
+#[tokio::test]
+async fn test_oauth2_credential_scoped_access() {
+    let manager = AuthManager::new();
+
+    // Create a role that can only access OAuth2 credentials
+    let role = manager
+        .create_role(
+            "oauth2-only",
+            [Permission::Read, Permission::Execute].into_iter().collect(),
+            vec!["oauth2-*".to_string()],
+            Some("Access only OAuth2 credentials".to_string()),
+        )
+        .unwrap();
+
+    // Create API key with this role
+    let (full_key, _) = manager
+        .create_api_key("oauth2-key", &role.name, None)
+        .unwrap();
+
+    let (_, validated_role) = manager.validate_key(&full_key).unwrap();
+
+    // Should access oauth2 credentials
+    assert!(validated_role.can_access_credential("oauth2-github"));
+    assert!(validated_role.can_access_credential("oauth2-google"));
+
+    // Should NOT access other credentials
+    assert!(!validated_role.can_access_credential("api-key-stripe"));
+    assert!(!validated_role.can_access_credential("basic-auth-db"));
 }

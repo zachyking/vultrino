@@ -181,6 +181,11 @@ impl VultrinoServer {
 
         // Execute through plugin
         let request_id = context.request_id.clone();
+        let credential_id = credential.id.clone();
+        let credential_alias = credential.alias.clone();
+        let credential_metadata = credential.metadata.clone();
+        let credential_created_at = credential.created_at;
+
         let plugin_request = crate::plugins::PluginRequest {
             credential,
             action: action_name.to_string(),
@@ -189,6 +194,32 @@ impl VultrinoServer {
         };
 
         let response = plugin.execute(plugin_request).await?;
+
+        // If the credential was updated (e.g., OAuth2 token refresh), persist it
+        if let Some(updated_data) = &response.updated_credential {
+            let updated_credential = crate::Credential {
+                id: credential_id,
+                alias: credential_alias,
+                credential_type: updated_data.credential_type(),
+                data: updated_data.clone(),
+                metadata: credential_metadata,
+                created_at: credential_created_at,
+                updated_at: chrono::Utc::now(),
+            };
+
+            if let Err(e) = self.storage.store(&updated_credential).await {
+                tracing::warn!(
+                    request_id = %request_id,
+                    error = %e,
+                    "Failed to persist updated credential (token refresh)"
+                );
+            } else {
+                tracing::debug!(
+                    request_id = %request_id,
+                    "Persisted updated credential after token refresh"
+                );
+            }
+        }
 
         // Record for rate limiting
         self.policy_engine.record_request(&request.credential);

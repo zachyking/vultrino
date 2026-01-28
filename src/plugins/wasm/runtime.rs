@@ -276,6 +276,7 @@ impl WasmRuntime for WasmtimeRuntime {
                 status: 200,
                 headers: HashMap::new(),
                 body: body.into_bytes(),
+                updated_credential: None,
             })
         } else {
             let error_msg = wasm_response.error.unwrap_or_else(|| "Unknown error".to_string());

@@ -161,6 +161,9 @@ pub enum CredentialData {
         #[serde(skip_serializing_if = "Option::is_none")]
         expires_at: Option<DateTime<Utc>>,
         token_url: String,
+        /// OAuth2 scopes for token requests
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        scopes: Vec<String>,
     },
 
     /// HTTP Basic Authentication
@@ -348,6 +351,9 @@ pub struct ExecuteResponse {
     /// Response body
     #[serde(with = "base64_bytes")]
     pub body: Vec<u8>,
+    /// Updated credential data (e.g., after OAuth2 token refresh)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub updated_credential: Option<CredentialData>,
 }
 
 impl ExecuteResponse {
@@ -357,6 +363,7 @@ impl ExecuteResponse {
             status: 200,
             headers: HashMap::new(),
             body: body.into(),
+            updated_credential: None,
         }
     }
 
@@ -366,7 +373,14 @@ impl ExecuteResponse {
             status,
             headers: HashMap::new(),
             body: message.into().into_bytes(),
+            updated_credential: None,
         }
+    }
+
+    /// Set updated credential data
+    pub fn with_updated_credential(mut self, credential: CredentialData) -> Self {
+        self.updated_credential = Some(credential);
+        self
     }
 }
 

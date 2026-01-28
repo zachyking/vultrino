@@ -21,8 +21,10 @@ Vultrino is a secure credential proxy that allows AI agents, LLMs, and automated
 ## Features
 
 - **Credential Isolation** — AI agents never see actual API keys or secrets
-- **Role-Based Access Control** — Fine-grained permissions for different applications
-- **Multiple Credential Types** — API keys, Basic Auth, Bearer tokens, and extensible via plugins
+- **Role-Based Access Control** — Fine-grained permissions with credential scoping
+- **Multiple Credential Types** — API keys, Basic Auth, OAuth2 (with automatic token refresh), and extensible via plugins
+- **OAuth2 Support** — Client credentials and refresh token flows with automatic token refresh
+- **Scoped API Keys** — Restrict which credentials each API key can access using glob patterns
 - **Plugin System** — Extend with custom credential types and actions via WASM plugins
 - **MCP Integration** — Native Model Context Protocol support for LLM tools
 - **Web UI** — Clean admin interface for managing credentials, roles, and API keys
@@ -93,7 +95,11 @@ vultrino serve --mcp
 ```bash
 # Credential Management
 vultrino add --alias <name> --key <api-key>    # Add API key credential
-vultrino add --alias <name> --basic            # Add basic auth (interactive)
+vultrino add --alias <name> -t basic_auth      # Add basic auth (interactive)
+vultrino add --alias <name> -t oauth2 \        # Add OAuth2 credential
+  --client-id <id> --client-secret <secret> \
+  --token-url https://oauth.example.com/token \
+  --scopes "read,write"
 vultrino list                                   # List all credentials
 vultrino remove <alias>                         # Remove a credential
 
@@ -111,6 +117,12 @@ vultrino plugin list                            # List installed plugins
 vultrino plugin info <name>                     # Show plugin details
 vultrino plugin remove <name>                   # Remove a plugin
 
+# Role & API Key Management
+vultrino role create <name> --permissions read,execute --scopes "github-*"
+vultrino role list
+vultrino key create <name> --role <role-name>
+vultrino key list
+
 # Server Modes
 vultrino web                                    # Start web UI
 vultrino serve --mcp                            # Start MCP server
@@ -126,6 +138,80 @@ The web interface provides:
 - **Roles** — Configure role-based access control
 - **Audit Log** — View credential usage history
 
+### OAuth2 Credentials
+
+Vultrino supports OAuth2 with automatic token refresh for machine-to-machine authentication:
+
+```bash
+# Add OAuth2 credential via CLI
+vultrino add --alias my-oauth2 -t oauth2 \
+  --client-id your-client-id \
+  --client-secret your-client-secret \
+  --token-url https://oauth.example.com/token \
+  --scopes "api,read,write"
+
+# With optional refresh token (for providers that issue them upfront)
+vultrino add --alias my-oauth2 -t oauth2 \
+  --client-id your-client-id \
+  --client-secret your-client-secret \
+  --token-url https://auth.provider.com/token \
+  --refresh-token your-refresh-token
+```
+
+**Supported Grant Types:**
+- `client_credentials` — Machine-to-machine API access (default)
+- `refresh_token` — Use refresh token to obtain new access token
+
+**Automatic Token Refresh:**
+- Vultrino automatically fetches tokens before the first request
+- Tokens are refreshed 5 minutes before expiration
+- Updated tokens are persisted to storage automatically
+- If refresh token flow fails, falls back to client credentials
+
+**Security:**
+- Token URLs must use HTTPS
+- SSRF protection prevents token endpoints pointing to internal IPs
+- Client secrets are encrypted at rest
+
+### Scoped API Keys
+
+API keys can be scoped to only access specific credentials using glob patterns:
+
+```bash
+# Create a role with credential scoping
+vultrino role create github-only \
+  --permissions read,execute \
+  --scopes "github-*" \
+  --description "Can only access GitHub credentials"
+
+# Create an API key with this role
+vultrino key create github-agent --role github-only
+# Output: vk_abc123...
+
+# This key can only access credentials matching "github-*"
+```
+
+**Scope Patterns:**
+- `github-*` — Matches `github-api`, `github-org`, etc.
+- `*-prod` — Matches `aws-prod`, `stripe-prod`, etc.
+- `oauth2-*` — Matches all OAuth2 credentials
+- Empty scopes (default) — Access all credentials
+
+**Using Scoped Keys:**
+
+```bash
+# CLI: Pass the API key with -k flag
+vultrino -k vk_abc123... request github-api https://api.github.com/user
+
+# MCP: Include api_key in tool arguments
+{"name": "http_request", "arguments": {
+  "api_key": "vk_abc123...",
+  "credential": "github-api",
+  "method": "GET",
+  "url": "https://api.github.com/user"
+}}
+```
+
 ### MCP Integration
 
 Vultrino provides native MCP (Model Context Protocol) support for AI agent integration:
@@ -133,12 +219,29 @@ Vultrino provides native MCP (Model Context Protocol) support for AI agent integ
 ```bash
 # Start MCP server
 vultrino serve --mcp
+
+# Or use the dedicated mcp command
+vultrino mcp
 ```
 
 Available MCP tools:
 - `http_request` — Make authenticated HTTP requests
 - `list_credentials` — List available credentials
+- `get_credential_info` — Get credential metadata
 - Plugin tools (e.g., `pgp_sign`, `pgp_verify`)
+
+**Example MCP Request:**
+```json
+{"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {
+  "name": "http_request",
+  "arguments": {
+    "api_key": "vk_your_api_key",
+    "credential": "github-api",
+    "method": "GET",
+    "url": "https://api.github.com/user"
+  }
+}}
+```
 
 ## Plugin System
 
@@ -239,6 +342,14 @@ cargo build --release --target wasm32-wasip1
 - Key derived using Argon2id
 - Each credential has unique nonce
 
+### Credential Types
+
+| Type | Description | Authentication Method |
+|------|-------------|----------------------|
+| `api_key` | API key/token | Header injection (default: `Authorization: Bearer <key>`) |
+| `basic_auth` | Username/password | Base64 encoded `Authorization: Basic` header |
+| `oauth2` | OAuth2 client credentials | Automatic token fetch/refresh, `Authorization: Bearer <token>` |
+
 ### Best Practices
 
 1. Use a strong `VULTRINO_PASSWORD`
@@ -246,6 +357,8 @@ cargo build --release --target wasm32-wasip1
 3. Use role-based access control for multi-user setups
 4. Enable audit logging in production
 5. Review plugin code before installation
+6. Use scoped API keys to limit AI agent access to specific credentials
+7. For OAuth2, prefer HTTPS token endpoints and rotate secrets regularly
 
 ## Architecture
 

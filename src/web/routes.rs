@@ -234,6 +234,12 @@ pub struct CredentialForm {
     // Basic Auth fields
     username: Option<String>,
     password: Option<String>,
+    // OAuth2 fields
+    client_id: Option<String>,
+    client_secret: Option<String>,
+    token_url: Option<String>,
+    scopes: Option<String>,
+    refresh_token: Option<String>,
     // Plugin credential fields (dynamic)
     #[serde(flatten)]
     plugin_fields: HashMap<String, String>,
@@ -290,6 +296,59 @@ pub async fn credential_create(
             CredentialData::BasicAuth {
                 username,
                 password: Secret::new(password),
+            }
+        }
+        "oauth2" => {
+            let client_id = match form.client_id {
+                Some(id) if !id.is_empty() => id,
+                _ => {
+                    return render_credential_new_error_with_session(&session, auth, "Client ID is required")
+                        .await
+                        .into_response();
+                }
+            };
+            let client_secret = match form.client_secret {
+                Some(s) if !s.is_empty() => s,
+                _ => {
+                    return render_credential_new_error_with_session(&session, auth, "Client Secret is required")
+                        .await
+                        .into_response();
+                }
+            };
+            let token_url = match form.token_url {
+                Some(url) if !url.is_empty() => {
+                    // Validate token URL - must be https for security
+                    if !url.starts_with("https://") {
+                        return render_credential_new_error_with_session(&session, auth, "Token URL must use HTTPS")
+                            .await
+                            .into_response();
+                    }
+                    url
+                }
+                _ => {
+                    return render_credential_new_error_with_session(&session, auth, "Token URL is required")
+                        .await
+                        .into_response();
+                }
+            };
+
+            // Parse scopes from comma-separated string
+            let scopes: Vec<String> = form
+                .scopes
+                .map(|s| s.split(',').map(|p| p.trim().to_string()).filter(|s| !s.is_empty()).collect())
+                .unwrap_or_default();
+
+            // Optional refresh token (some providers give it upfront)
+            let refresh_token = form.refresh_token.filter(|s| !s.is_empty()).map(Secret::new);
+
+            CredentialData::OAuth2 {
+                client_id,
+                client_secret: Secret::new(client_secret),
+                refresh_token,
+                access_token: None, // Will be fetched on first use
+                expires_at: None,
+                token_url,
+                scopes,
             }
         }
         cred_type if cred_type.starts_with("plugin:") => {

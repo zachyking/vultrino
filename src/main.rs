@@ -90,6 +90,26 @@ enum Commands {
         /// Custom header prefix (for api_key type)
         #[arg(long, default_value = "Bearer ")]
         header_prefix: String,
+
+        /// OAuth2 client ID
+        #[arg(long)]
+        client_id: Option<String>,
+
+        /// OAuth2 client secret (will prompt if not provided for oauth2 type)
+        #[arg(long)]
+        client_secret: Option<String>,
+
+        /// OAuth2 token URL (must be HTTPS)
+        #[arg(long)]
+        token_url: Option<String>,
+
+        /// OAuth2 scopes (comma-separated)
+        #[arg(long)]
+        scopes: Option<String>,
+
+        /// OAuth2 refresh token (optional)
+        #[arg(long)]
+        refresh_token: Option<String>,
     },
 
     /// List stored credentials
@@ -344,6 +364,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             password,
             header_name,
             header_prefix,
+            client_id,
+            client_secret,
+            token_url,
+            scopes,
+            refresh_token,
         } => {
             add_credential(
                 config,
@@ -355,6 +380,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 password,
                 header_name,
                 header_prefix,
+                client_id,
+                client_secret,
+                token_url,
+                scopes,
+                refresh_token,
             )
             .await?;
         }
@@ -622,6 +652,11 @@ async fn add_credential(
     password: Option<String>,
     header_name: String,
     header_prefix: String,
+    client_id: Option<String>,
+    client_secret: Option<String>,
+    token_url: Option<String>,
+    scopes: Option<String>,
+    refresh_token: Option<String>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let storage = init_storage(&config).await?;
 
@@ -647,6 +682,38 @@ async fn add_credential(
             CredentialData::BasicAuth {
                 username,
                 password: Secret::new(password),
+            }
+        }
+        "oauth2" => {
+            let client_id = client_id.ok_or("Client ID is required (--client-id)")?;
+            let token_url = token_url.ok_or("Token URL is required (--token-url)")?;
+
+            // Validate token URL is HTTPS
+            if !token_url.starts_with("https://") {
+                return Err("Token URL must use HTTPS for security".into());
+            }
+
+            let client_secret = if let Some(s) = client_secret {
+                s
+            } else {
+                eprint!("Enter client secret: ");
+                io::stderr().flush()?;
+                rpassword::read_password()?
+            };
+
+            // Parse scopes
+            let scopes_vec: Vec<String> = scopes
+                .map(|s| s.split(',').map(|p| p.trim().to_string()).filter(|s| !s.is_empty()).collect())
+                .unwrap_or_default();
+
+            CredentialData::OAuth2 {
+                client_id,
+                client_secret: Secret::new(client_secret),
+                refresh_token: refresh_token.map(Secret::new),
+                access_token: None,
+                expires_at: None,
+                token_url,
+                scopes: scopes_vec,
             }
         }
         other => {

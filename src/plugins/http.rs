@@ -6,9 +6,10 @@
 //! - OAuth2 (token refresh, etc.)
 
 use super::{Plugin, PluginError, PluginRequest};
-use crate::{CredentialData, CredentialType, ExecuteResponse};
+use crate::{CredentialData, CredentialType, ExecuteResponse, Secret};
 use async_trait::async_trait;
 use base64::{engine::general_purpose::STANDARD, Engine};
+use chrono::{DateTime, Duration, Utc};
 use reqwest::{Client, Method};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -38,6 +39,23 @@ pub struct HttpRequestParams {
     pub query: HashMap<String, String>,
 }
 
+/// Response from OAuth2 token endpoint
+#[derive(Debug, Deserialize)]
+struct TokenResponse {
+    access_token: String,
+    /// Token type (typically "Bearer") - kept for completeness but not used
+    #[serde(default)]
+    #[allow(dead_code)]
+    token_type: String,
+    /// Token lifetime in seconds
+    expires_in: Option<u64>,
+    /// New refresh token (some providers rotate refresh tokens)
+    refresh_token: Option<String>,
+}
+
+/// Buffer time before token expiration to trigger refresh (5 minutes)
+const TOKEN_REFRESH_BUFFER_SECS: i64 = 300;
+
 impl HttpPlugin {
     /// Create a new HTTP plugin
     pub fn new() -> Self {
@@ -47,6 +65,223 @@ impl HttpPlugin {
             .expect("Failed to create HTTP client");
 
         Self { client }
+    }
+
+    /// Validate token URL for SSRF protection - requires HTTPS
+    fn validate_token_url_ssrf(url_str: &str) -> Result<url::Url, PluginError> {
+        let url = url::Url::parse(url_str)
+            .map_err(|e| PluginError::InvalidParams(format!("Invalid token URL: {}", e)))?;
+
+        // Token URLs must use HTTPS to prevent credential leakage
+        if url.scheme() != "https" {
+            return Err(PluginError::InvalidParams(
+                "Token URL must use HTTPS for security".to_string(),
+            ));
+        }
+
+        // Get the host
+        let host = url.host_str().ok_or_else(|| {
+            PluginError::InvalidParams("Token URL must have a host".to_string())
+        })?;
+
+        // Check for IP address literals
+        if let Ok(ip) = host.parse::<IpAddr>() {
+            if Self::is_private_ip(&ip) {
+                return Err(PluginError::InvalidParams(
+                    "Token URL cannot point to private/internal IP addresses".to_string(),
+                ));
+            }
+        }
+
+        // Resolve hostname and check all resolved IPs
+        let port = url.port_or_known_default().unwrap_or(443);
+        let socket_addr = format!("{}:{}", host, port);
+
+        if let Ok(addrs) = socket_addr.to_socket_addrs() {
+            for addr in addrs {
+                if Self::is_private_ip(&addr.ip()) {
+                    return Err(PluginError::InvalidParams(format!(
+                        "Token URL host '{}' resolves to private/internal IP address, which is not allowed",
+                        host
+                    )));
+                }
+            }
+        }
+
+        Ok(url)
+    }
+
+    /// Check if an OAuth2 token needs refresh
+    fn needs_refresh(expires_at: Option<DateTime<Utc>>) -> bool {
+        match expires_at {
+            Some(expires) => {
+                let buffer = Duration::seconds(TOKEN_REFRESH_BUFFER_SECS);
+                Utc::now() + buffer >= expires
+            }
+            // No expiration time means we should try to use the token
+            // and let the API tell us if it's expired
+            None => false,
+        }
+    }
+
+    /// Fetch access token using client credentials flow
+    async fn fetch_client_credentials_token(
+        &self,
+        client_id: &str,
+        client_secret: &Secret,
+        token_url: &str,
+        scopes: &[String],
+    ) -> Result<TokenResponse, PluginError> {
+        let validated_url = Self::validate_token_url_ssrf(token_url)?;
+
+        let mut form_data = vec![
+            ("grant_type", "client_credentials".to_string()),
+            ("client_id", client_id.to_string()),
+            ("client_secret", client_secret.expose().to_string()),
+        ];
+
+        if !scopes.is_empty() {
+            form_data.push(("scope", scopes.join(" ")));
+        }
+
+        let response = self
+            .client
+            .post(validated_url)
+            .form(&form_data)
+            .send()
+            .await
+            .map_err(|e| PluginError::Http(format!("Token request failed: {}", e)))?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
+            return Err(PluginError::ExecutionFailed(format!(
+                "Token endpoint returned {}: {}",
+                status, body
+            )));
+        }
+
+        response
+            .json::<TokenResponse>()
+            .await
+            .map_err(|e| PluginError::ExecutionFailed(format!("Failed to parse token response: {}", e)))
+    }
+
+    /// Refresh access token using refresh token
+    async fn refresh_access_token(
+        &self,
+        client_id: &str,
+        client_secret: &Secret,
+        refresh_token: &Secret,
+        token_url: &str,
+        scopes: &[String],
+    ) -> Result<TokenResponse, PluginError> {
+        let validated_url = Self::validate_token_url_ssrf(token_url)?;
+
+        let mut form_data = vec![
+            ("grant_type", "refresh_token".to_string()),
+            ("refresh_token", refresh_token.expose().to_string()),
+            ("client_id", client_id.to_string()),
+            ("client_secret", client_secret.expose().to_string()),
+        ];
+
+        if !scopes.is_empty() {
+            form_data.push(("scope", scopes.join(" ")));
+        }
+
+        let response = self
+            .client
+            .post(validated_url)
+            .form(&form_data)
+            .send()
+            .await
+            .map_err(|e| PluginError::Http(format!("Token refresh failed: {}", e)))?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
+            return Err(PluginError::ExecutionFailed(format!(
+                "Token refresh endpoint returned {}: {}",
+                status, body
+            )));
+        }
+
+        response
+            .json::<TokenResponse>()
+            .await
+            .map_err(|e| PluginError::ExecutionFailed(format!("Failed to parse token response: {}", e)))
+    }
+
+    /// Ensure we have a valid access token, refreshing if needed
+    ///
+    /// Returns the access token to use and optionally updated credential data
+    async fn ensure_valid_token(
+        &self,
+        cred_data: &CredentialData,
+    ) -> Result<(String, Option<CredentialData>), PluginError> {
+        match cred_data {
+            CredentialData::OAuth2 {
+                client_id,
+                client_secret,
+                refresh_token,
+                access_token,
+                expires_at,
+                token_url,
+                scopes,
+            } => {
+                // Check if we have a valid, non-expired token
+                if let Some(token) = access_token {
+                    if !Self::needs_refresh(*expires_at) {
+                        // Token is still valid
+                        return Ok((token.expose().to_string(), None));
+                    }
+                }
+
+                // Need to get a new token
+                let token_response = if let Some(rt) = refresh_token {
+                    // Try refresh token flow first
+                    match self
+                        .refresh_access_token(client_id, client_secret, rt, token_url, scopes)
+                        .await
+                    {
+                        Ok(resp) => resp,
+                        Err(_) => {
+                            // Refresh token might be expired, fall back to client credentials
+                            self.fetch_client_credentials_token(client_id, client_secret, token_url, scopes)
+                                .await?
+                        }
+                    }
+                } else {
+                    // No refresh token, use client credentials flow
+                    self.fetch_client_credentials_token(client_id, client_secret, token_url, scopes)
+                        .await?
+                };
+
+                // Calculate new expiration time
+                let new_expires_at = token_response.expires_in.map(|secs| {
+                    Utc::now() + Duration::seconds(secs as i64)
+                });
+
+                // Build updated credential data
+                let updated_cred = CredentialData::OAuth2 {
+                    client_id: client_id.clone(),
+                    client_secret: client_secret.clone(),
+                    refresh_token: token_response
+                        .refresh_token
+                        .map(Secret::new)
+                        .or_else(|| refresh_token.clone()),
+                    access_token: Some(Secret::new(token_response.access_token.clone())),
+                    expires_at: new_expires_at,
+                    token_url: token_url.clone(),
+                    scopes: scopes.clone(),
+                };
+
+                Ok((token_response.access_token, Some(updated_cred)))
+            }
+            _ => Err(PluginError::UnsupportedCredentialType(
+                "ensure_valid_token only works with OAuth2 credentials".to_string(),
+            )),
+        }
     }
 
     /// Inject credentials into request headers
@@ -206,9 +441,20 @@ impl HttpPlugin {
         let method = Method::from_str(&params.method.to_uppercase())
             .map_err(|_| PluginError::InvalidParams(format!("Invalid HTTP method: {}", params.method)))?;
 
+        // For OAuth2, ensure we have a valid token and get any updated credential
+        let (effective_cred, updated_credential) = match cred_data {
+            CredentialData::OAuth2 { .. } => {
+                let (_access_token, updated) = self.ensure_valid_token(cred_data).await?;
+                // Use the updated credential with fresh token for the request
+                let effective = updated.clone().unwrap_or_else(|| cred_data.clone());
+                (effective, updated)
+            }
+            _ => (cred_data.clone(), None),
+        };
+
         // Build headers with credential injection
         let mut headers = params.headers;
-        self.inject_credentials(&mut headers, cred_data)?;
+        self.inject_credentials(&mut headers, &effective_cred)?;
 
         // Build request using the validated URL
         let mut request = self.client.request(method, validated_url);
@@ -256,6 +502,7 @@ impl HttpPlugin {
             status,
             headers: response_headers,
             body,
+            updated_credential,
         })
     }
 }
@@ -553,5 +800,95 @@ mod tests {
             "url": "file:///etc/passwd"
         });
         assert!(plugin.validate_params("request", &params).is_err());
+    }
+
+    // OAuth2 Token Refresh Tests
+
+    #[test]
+    fn test_needs_refresh_none_expiration() {
+        // No expiration should not trigger refresh
+        assert!(!HttpPlugin::needs_refresh(None));
+    }
+
+    #[test]
+    fn test_needs_refresh_future_expiration() {
+        // Token expiring in 1 hour should not need refresh
+        let expires = Utc::now() + Duration::hours(1);
+        assert!(!HttpPlugin::needs_refresh(Some(expires)));
+    }
+
+    #[test]
+    fn test_needs_refresh_near_expiration() {
+        // Token expiring in 2 minutes should trigger refresh (within 5 min buffer)
+        let expires = Utc::now() + Duration::minutes(2);
+        assert!(HttpPlugin::needs_refresh(Some(expires)));
+    }
+
+    #[test]
+    fn test_needs_refresh_expired() {
+        // Already expired token should trigger refresh
+        let expires = Utc::now() - Duration::minutes(5);
+        assert!(HttpPlugin::needs_refresh(Some(expires)));
+    }
+
+    #[test]
+    fn test_validate_token_url_requires_https() {
+        // HTTP should be rejected
+        let result = HttpPlugin::validate_token_url_ssrf("http://oauth.example.com/token");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("HTTPS"));
+
+        // HTTPS should be accepted
+        let result = HttpPlugin::validate_token_url_ssrf("https://oauth.example.com/token");
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_validate_token_url_blocks_private_ip() {
+        let result = HttpPlugin::validate_token_url_ssrf("https://192.168.1.1/token");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("private"));
+    }
+
+    #[test]
+    fn test_inject_oauth2_with_token() {
+        let plugin = HttpPlugin::new();
+        let mut headers = HashMap::new();
+
+        let cred_data = CredentialData::OAuth2 {
+            client_id: "client-123".to_string(),
+            client_secret: Secret::new("secret-456"),
+            refresh_token: None,
+            access_token: Some(Secret::new("access-token-789")),
+            expires_at: None,
+            token_url: "https://oauth.example.com/token".to_string(),
+            scopes: vec![],
+        };
+
+        plugin.inject_credentials(&mut headers, &cred_data).unwrap();
+
+        assert_eq!(
+            headers.get("Authorization"),
+            Some(&"Bearer access-token-789".to_string())
+        );
+    }
+
+    #[test]
+    fn test_inject_oauth2_without_token_fails() {
+        let plugin = HttpPlugin::new();
+        let mut headers = HashMap::new();
+
+        let cred_data = CredentialData::OAuth2 {
+            client_id: "client-123".to_string(),
+            client_secret: Secret::new("secret-456"),
+            refresh_token: None,
+            access_token: None,
+            expires_at: None,
+            token_url: "https://oauth.example.com/token".to_string(),
+            scopes: vec![],
+        };
+
+        let result = plugin.inject_credentials(&mut headers, &cred_data);
+        assert!(result.is_err());
     }
 }
