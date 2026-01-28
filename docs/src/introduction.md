@@ -1,6 +1,6 @@
 # Vultrino
 
-**A credential proxy for the AI era** — enabling AI agents to use credentials without seeing them.
+> **A credential proxy for the AI era** — enabling AI agents to use credentials without seeing them.
 
 ## What is Vultrino?
 
