@@ -13,15 +13,16 @@ pub struct PluginLoader {
     installer: PluginInstaller,
 }
 
+impl Default for PluginLoader {
+    fn default() -> Self {
+        Self::new(PluginInstaller::default())
+    }
+}
+
 impl PluginLoader {
     /// Create a new plugin loader
     pub fn new(installer: PluginInstaller) -> Self {
         Self { installer }
-    }
-
-    /// Create loader with default installer
-    pub fn default() -> Self {
-        Self::new(PluginInstaller::default())
     }
 
     /// Load all installed plugins into a registry

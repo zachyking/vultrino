@@ -40,7 +40,7 @@ impl Permission {
     }
 
     /// Parse a permission from string
-    pub fn from_str(s: &str) -> Option<Permission> {
+    pub fn parse(s: &str) -> Option<Permission> {
         match s.to_lowercase().as_str() {
             "read" => Some(Permission::Read),
             "write" => Some(Permission::Write),
@@ -59,7 +59,7 @@ impl Permission {
             if part.is_empty() {
                 continue;
             }
-            match Permission::from_str(part) {
+            match Permission::parse(part) {
                 Some(p) => {
                     permissions.insert(p);
                 }
@@ -269,9 +269,9 @@ mod tests {
 
     #[test]
     fn test_permission_parsing() {
-        assert_eq!(Permission::from_str("read"), Some(Permission::Read));
-        assert_eq!(Permission::from_str("WRITE"), Some(Permission::Write));
-        assert_eq!(Permission::from_str("invalid"), None);
+        assert_eq!(Permission::parse("read"), Some(Permission::Read));
+        assert_eq!(Permission::parse("WRITE"), Some(Permission::Write));
+        assert_eq!(Permission::parse("invalid"), None);
     }
 
     #[test]

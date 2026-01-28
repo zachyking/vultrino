@@ -73,6 +73,12 @@ pub struct PluginInstaller {
     plugins_dir: PathBuf,
 }
 
+impl Default for PluginInstaller {
+    fn default() -> Self {
+        Self::new(Self::default_plugins_dir())
+    }
+}
+
 impl PluginInstaller {
     /// Create a new plugin installer
     pub fn new(plugins_dir: PathBuf) -> Self {
@@ -85,11 +91,6 @@ impl PluginInstaller {
             .unwrap_or_else(|| PathBuf::from("."))
             .join("vultrino")
             .join("plugins")
-    }
-
-    /// Create installer with default plugins directory
-    pub fn default() -> Self {
-        Self::new(Self::default_plugins_dir())
     }
 
     /// Ensure the plugins directory exists

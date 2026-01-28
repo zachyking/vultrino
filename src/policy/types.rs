@@ -145,7 +145,7 @@ impl PolicyCondition {
     }
 
     /// Negate a condition
-    pub fn not(condition: PolicyCondition) -> Self {
+    pub fn negate(condition: PolicyCondition) -> Self {
         Self::Not(Box::new(condition))
     }
 }

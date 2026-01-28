@@ -70,10 +70,10 @@ impl TryFrom<RawStorageConfig> for StorageConfig {
         let file_path = raw.file.and_then(|f| {
             f.path.map(|p| {
                 // Expand ~ to home directory
-                if p.starts_with("~/") {
+                if let Some(rest) = p.strip_prefix("~/") {
                     dirs::home_dir()
                         .unwrap_or_else(|| PathBuf::from("."))
-                        .join(&p[2..])
+                        .join(rest)
                 } else {
                     PathBuf::from(p)
                 }
@@ -132,10 +132,10 @@ impl From<RawLoggingConfig> for LoggingConfig {
                 _ => LogFormat::Pretty,
             },
             audit_file: raw.audit_file.map(|p| {
-                if p.starts_with("~/") {
+                if let Some(rest) = p.strip_prefix("~/") {
                     dirs::home_dir()
                         .unwrap_or_else(|| PathBuf::from("."))
-                        .join(&p[2..])
+                        .join(rest)
                 } else {
                     PathBuf::from(p)
                 }
@@ -324,7 +324,7 @@ condition = { method_match = ["POST", "PUT", "DELETE"] }
 action = "deny"
 "#;
 
-        let config = Config::from_str(toml).unwrap();
+        let config = Config::parse(toml).unwrap();
         assert_eq!(config.server.bind, "127.0.0.1:7878");
         assert_eq!(config.server.mode, ServerMode::Local);
         assert_eq!(config.policies.len(), 1);
@@ -335,7 +335,7 @@ action = "deny"
     #[test]
     fn test_minimal_config() {
         let toml = "";
-        let config = Config::from_str(toml).unwrap();
+        let config = Config::parse(toml).unwrap();
         assert_eq!(config.server.bind, "127.0.0.1:7878");
     }
 }

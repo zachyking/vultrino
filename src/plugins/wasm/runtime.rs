@@ -126,7 +126,7 @@ impl WasmtimeRuntime {
     fn read_from_wasm(store: &Store<WasmState>, memory: &Memory, ptr: &WasmPtr) -> Result<Vec<u8>, PluginError> {
         let mut buffer = vec![0u8; ptr.len as usize];
         memory
-            .read(&store, ptr.offset as usize, &mut buffer)
+            .read(store, ptr.offset as usize, &mut buffer)
             .map_err(|e| PluginError::Wasm(format!("Memory read failed: {}", e)))?;
 
         Ok(buffer)

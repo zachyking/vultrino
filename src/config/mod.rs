@@ -60,7 +60,7 @@ impl Config {
     }
 
     /// Load configuration from a string
-    pub fn from_str(content: &str) -> Result<Self, ConfigError> {
+    pub fn parse(content: &str) -> Result<Self, ConfigError> {
         let raw: RawConfig =
             toml::from_str(content).map_err(|e| ConfigError::ParseError(e.to_string()))?;
 

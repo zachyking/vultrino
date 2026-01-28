@@ -762,7 +762,7 @@ async fn list_credentials(config: Config, format: String) -> Result<(), Box<dyn 
         }
         _ => {
             // Table format
-            println!("{:<20} {:<15} {:<36} {}", "ALIAS", "TYPE", "ID", "DESCRIPTION");
+            println!("{:<20} {:<15} {:<36} DESCRIPTION", "ALIAS", "TYPE", "ID");
             println!("{}", "-".repeat(80));
             for cred in credentials {
                 let desc = cred
@@ -1019,10 +1019,7 @@ async fn list_roles(config: Config, format: String) -> Result<(), Box<dyn std::e
             println!("{}", json);
         }
         _ => {
-            println!(
-                "{:<20} {:<36} {:<30} {}",
-                "NAME", "ID", "PERMISSIONS", "SCOPES"
-            );
+            println!("{:<20} {:<36} {:<30} SCOPES", "NAME", "ID", "PERMISSIONS");
             println!("{}", "-".repeat(100));
             for role in all_roles {
                 let perms: String = role
@@ -1231,8 +1228,8 @@ async fn list_api_keys(config: Config, format: String) -> Result<(), Box<dyn std
         }
         _ => {
             println!(
-                "{:<20} {:<12} {:<20} {:<20} {}",
-                "NAME", "KEY PREFIX", "ROLE", "EXPIRES", "LAST USED"
+                "{:<20} {:<12} {:<20} {:<20} LAST USED",
+                "NAME", "KEY PREFIX", "ROLE", "EXPIRES"
             );
             println!("{}", "-".repeat(90));
             for key in keys {
@@ -1290,6 +1287,7 @@ async fn revoke_api_key(config: Config, id: String) -> Result<(), Box<dyn std::e
 ///
 /// If `api_key` is provided, connects to a running Vultrino server via HTTP API.
 /// Otherwise, uses direct storage access (requires VULTRINO_PASSWORD).
+#[allow(clippy::too_many_arguments)]
 async fn make_request(
     config: Config,
     credential: String,
@@ -1310,9 +1308,8 @@ async fn make_request(
 
     // Parse body - support @filename syntax
     let body: Option<serde_json::Value> = if let Some(data_str) = &data {
-        if data_str.starts_with('@') {
+        if let Some(filename) = data_str.strip_prefix('@') {
             // Read from file
-            let filename = &data_str[1..];
             let content = tokio::fs::read_to_string(filename).await?;
             Some(serde_json::from_str(&content)?)
         } else {
@@ -1358,6 +1355,7 @@ async fn make_request(
 }
 
 /// Make request via HTTP API (connects to running Vultrino server)
+#[allow(clippy::too_many_arguments)]
 async fn make_request_via_api(
     _config: &Config,
     credential: &str,
@@ -1425,7 +1423,7 @@ fn output_response(method: &str, url: &str, status: u16, body: &[u8], quiet: boo
         print!("{}", body_text);
     } else {
         // Status and body
-        let status_emoji = if status >= 200 && status < 300 {
+        let status_emoji = if (200..300).contains(&status) {
             "+"
         } else if status >= 400 {
             "!"
@@ -1569,8 +1567,8 @@ async fn list_plugins(format: String) -> Result<(), Box<dyn std::error::Error>> 
         }
         _ => {
             println!(
-                "{:<20} {:<10} {:<30} {}",
-                "NAME", "VERSION", "SOURCE", "CREDENTIAL TYPES"
+                "{:<20} {:<10} {:<30} CREDENTIAL TYPES",
+                "NAME", "VERSION", "SOURCE"
             );
             println!("{}", "-".repeat(90));
             for plugin in plugins {

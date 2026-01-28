@@ -71,12 +71,12 @@ pub struct EncryptedData {
 
 impl EncryptedData {
     /// Serialize to a single string for storage
-    pub fn to_string(&self) -> String {
+    pub fn encode(&self) -> String {
         format!("{}:{}", self.nonce, self.ciphertext)
     }
 
     /// Parse from a single string
-    pub fn from_str(s: &str) -> Result<Self, CryptoError> {
+    pub fn decode(s: &str) -> Result<Self, CryptoError> {
         let parts: Vec<&str> = s.splitn(2, ':').collect();
         if parts.len() != 2 {
             return Err(CryptoError::InvalidFormat(
@@ -239,8 +239,8 @@ mod tests {
         let key = derive_key(&password, &salt).unwrap();
 
         let encrypted = encrypt(b"test data", &key).unwrap();
-        let serialized = encrypted.to_string();
-        let parsed = EncryptedData::from_str(&serialized).unwrap();
+        let serialized = encrypted.encode();
+        let parsed = EncryptedData::decode(&serialized).unwrap();
 
         assert_eq!(encrypted.nonce, parsed.nonce);
         assert_eq!(encrypted.ciphertext, parsed.ciphertext);

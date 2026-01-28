@@ -240,7 +240,7 @@ pub struct ResourcesListResult {
     pub resources: Vec<Resource>,
 }
 
-/// Vultrino-specific tool arguments
+// Vultrino-specific tool arguments
 
 /// Arguments for list_credentials tool
 #[derive(Debug, Clone, Serialize, Deserialize)]

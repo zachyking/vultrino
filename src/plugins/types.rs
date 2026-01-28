@@ -25,19 +25,14 @@ pub enum ManifestError {
 }
 
 /// Plugin format type
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum PluginFormat {
     /// WebAssembly module
+    #[default]
     Wasm,
     /// Built-in Rust plugin
     Builtin,
-}
-
-impl Default for PluginFormat {
-    fn default() -> Self {
-        Self::Wasm
-    }
 }
 
 /// Basic plugin information
@@ -226,10 +221,11 @@ impl CredentialTypeDefinition {
 }
 
 /// Field type for credential forms
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum FieldType {
     /// Single-line text input
+    #[default]
     Text,
     /// Password field (hidden input)
     Password,
@@ -243,12 +239,6 @@ pub enum FieldType {
     File,
     /// Hidden field
     Hidden,
-}
-
-impl Default for FieldType {
-    fn default() -> Self {
-        Self::Text
-    }
 }
 
 /// Option for select fields
@@ -389,21 +379,16 @@ impl ActionDefinition {
 }
 
 /// Parameter type for action parameters
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum ParameterType {
+    #[default]
     String,
     Integer,
     Number,
     Boolean,
     Object,
     Array,
-}
-
-impl Default for ParameterType {
-    fn default() -> Self {
-        Self::String
-    }
 }
 
 /// Definition of a parameter for an action

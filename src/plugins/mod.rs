@@ -343,8 +343,7 @@ impl Default for PluginRegistry {
 
 /// Check if a URL matches a pattern (simple glob-style matching)
 fn url_matches(url: &str, pattern: &str) -> bool {
-    if pattern.ends_with('*') {
-        let prefix = &pattern[..pattern.len() - 1];
+    if let Some(prefix) = pattern.strip_suffix('*') {
         url.starts_with(prefix)
     } else {
         url == pattern
