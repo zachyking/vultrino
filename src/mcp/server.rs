@@ -3,7 +3,7 @@
 //! Exposes Vultrino capabilities through the Model Context Protocol.
 
 use super::types::*;
-use crate::auth::{AuthResult, Permission};
+use crate::auth::{AuthManager, AuthResult, Permission};
 use crate::plugins::PluginInstaller;
 use crate::server::VultrinoServer;
 use crate::{CredentialMetadata, ExecuteRequest};
@@ -20,51 +20,45 @@ pub struct McpServer {
     vultrino: Arc<RwLock<VultrinoServer>>,
     /// Whether initialized
     initialized: bool,
-    /// Current authentication (if any)
-    auth: Option<AuthResult>,
+    /// Auth manager for validating API keys (required)
+    auth_manager: Arc<RwLock<AuthManager>>,
 }
 
 impl McpServer {
-    /// Create a new MCP server
-    pub fn new(vultrino: Arc<RwLock<VultrinoServer>>) -> Self {
+    /// Create a new MCP server with auth manager (required)
+    pub fn new(vultrino: Arc<RwLock<VultrinoServer>>, auth_manager: Arc<RwLock<AuthManager>>) -> Self {
         Self {
             vultrino,
             initialized: false,
-            auth: None,
+            auth_manager,
         }
     }
 
-    /// Create a new MCP server with authentication
-    pub fn with_auth(vultrino: Arc<RwLock<VultrinoServer>>, auth: AuthResult) -> Self {
-        Self {
-            vultrino,
-            initialized: false,
-            auth: Some(auth),
-        }
+    /// Validate an API key and return auth result
+    async fn validate_api_key(&self, api_key: &str) -> Result<AuthResult, String> {
+        let manager = self.auth_manager.read().await;
+        let (key, role) = manager
+            .validate_key(api_key)
+            .map_err(|e| format!("Invalid API key: {}", e))?;
+
+        Ok(AuthResult {
+            api_key: key,
+            role,
+        })
     }
 
-    /// Check if the current auth has a specific permission
-    fn check_permission(&self, permission: Permission) -> Result<(), (i32, String)> {
-        if let Some(ref auth) = self.auth {
-            if !auth.has_permission(permission) {
-                return Err((
-                    INTERNAL_ERROR,
-                    format!("Permission denied: requires '{}' permission", permission),
-                ));
-            }
+    /// Check permission for a validated auth
+    fn check_permission(auth: &AuthResult, permission: Permission) -> Result<(), String> {
+        if !auth.has_permission(permission) {
+            return Err(format!("Permission denied: requires '{}' permission", permission));
         }
         Ok(())
     }
 
-    /// Check if the current auth can access a specific credential
-    fn check_credential_access(&self, alias: &str) -> Result<(), (i32, String)> {
-        if let Some(ref auth) = self.auth {
-            if !auth.can_access_credential(alias) {
-                return Err((
-                    INTERNAL_ERROR,
-                    format!("Access denied to credential: {}", alias),
-                ));
-            }
+    /// Check credential access for a validated auth
+    fn check_credential_access(auth: &AuthResult, alias: &str) -> Result<(), String> {
+        if !auth.can_access_credential(alias) {
+            return Err(format!("Access denied to credential: {}", alias));
         }
         Ok(())
     }
@@ -198,12 +192,16 @@ impl McpServer {
                 input_schema: json!({
                     "type": "object",
                     "properties": {
+                        "api_key": {
+                            "type": "string",
+                            "description": "Your Vultrino API key (starts with 'vk_') for authentication"
+                        },
                         "pattern": {
                             "type": "string",
                             "description": "Optional glob pattern to filter credentials (e.g., 'github-*')"
                         }
                     },
-                    "required": []
+                    "required": ["api_key"]
                 }),
             },
             Tool {
@@ -215,9 +213,13 @@ impl McpServer {
                 input_schema: json!({
                     "type": "object",
                     "properties": {
+                        "api_key": {
+                            "type": "string",
+                            "description": "Your Vultrino API key (starts with 'vk_') for authentication"
+                        },
                         "credential": {
                             "type": "string",
-                            "description": "The credential alias to use for authentication"
+                            "description": "The credential alias to use for the request"
                         },
                         "method": {
                             "type": "string",
@@ -242,7 +244,7 @@ impl McpServer {
                             "additionalProperties": { "type": "string" }
                         }
                     },
-                    "required": ["credential", "method", "url"]
+                    "required": ["api_key", "credential", "method", "url"]
                 }),
             },
             Tool {
@@ -253,12 +255,16 @@ impl McpServer {
                 input_schema: json!({
                     "type": "object",
                     "properties": {
+                        "api_key": {
+                            "type": "string",
+                            "description": "Your Vultrino API key (starts with 'vk_') for authentication"
+                        },
                         "credential": {
                             "type": "string",
                             "description": "The credential alias or ID"
                         }
                     },
-                    "required": ["credential"]
+                    "required": ["api_key", "credential"]
                 }),
             },
         ];
@@ -292,7 +298,7 @@ impl McpServer {
                     .iter()
                     .find(|a| a.name == mcp_tool.action);
 
-                let input_schema = if let Some(action) = action {
+                let mut input_schema = if let Some(action) = action {
                     mcp_tool.generate_input_schema(action)
                 } else {
                     // Default schema with just credential
@@ -307,6 +313,19 @@ impl McpServer {
                         "required": ["credential"]
                     })
                 };
+
+                // Add api_key to all plugin tools
+                if let Some(props) = input_schema.get_mut("properties") {
+                    props["api_key"] = json!({
+                        "type": "string",
+                        "description": "Your Vultrino API key (starts with 'vk_') for authentication"
+                    });
+                }
+                if let Some(required) = input_schema.get_mut("required") {
+                    if let Some(arr) = required.as_array_mut() {
+                        arr.insert(0, json!("api_key"));
+                    }
+                }
 
                 let tool_name = format!("{}_{}", info.manifest.plugin.name.replace('-', "_"), mcp_tool.name);
                 let description = mcp_tool
@@ -374,8 +393,19 @@ impl McpServer {
         tool_name: &str,
         args: serde_json::Value,
     ) -> Option<Result<Vec<ToolContent>, String>> {
+        // Extract and validate API key
+        let api_key = match args.get("api_key").and_then(|v| v.as_str()) {
+            Some(k) => k,
+            None => return Some(Err("Missing 'api_key' argument".to_string())),
+        };
+
+        let auth = match self.validate_api_key(api_key).await {
+            Ok(a) => a,
+            Err(e) => return Some(Err(e)),
+        };
+
         // Check execute permission
-        if let Err((_, msg)) = self.check_permission(Permission::Execute) {
+        if let Err(msg) = Self::check_permission(&auth, Permission::Execute) {
             return Some(Err(msg));
         }
 
@@ -416,7 +446,7 @@ impl McpServer {
             };
 
             // Check credential access
-            if let Err((_, msg)) = self.check_credential_access(&credential) {
+            if let Err(msg) = Self::check_credential_access(&auth, &credential) {
                 return Some(Err(msg));
             }
 
@@ -430,7 +460,7 @@ impl McpServer {
             // Execute through Vultrino
             let vultrino = self.vultrino.read().await;
             let response = match vultrino
-                .execute_with_auth(request, self.auth.as_ref())
+                .execute_with_auth(request, Some(&auth))
                 .await
             {
                 Ok(r) => r,
@@ -482,12 +512,18 @@ impl McpServer {
         &self,
         args: serde_json::Value,
     ) -> Result<Vec<ToolContent>, String> {
-        // Check read permission
-        self.check_permission(Permission::Read)
-            .map_err(|(_, msg)| msg)?;
+        #[derive(serde::Deserialize)]
+        struct Args {
+            api_key: String,
+            pattern: Option<String>,
+        }
 
-        let args: ListCredentialsArgs =
-            serde_json::from_value(args).unwrap_or(ListCredentialsArgs { pattern: None });
+        let args: Args = serde_json::from_value(args)
+            .map_err(|e| format!("Invalid arguments: {}. api_key is required.", e))?;
+
+        // Validate API key and check permission
+        let auth = self.validate_api_key(&args.api_key).await?;
+        Self::check_permission(&auth, Permission::Read)?;
 
         let vultrino = self.vultrino.read().await;
         let credentials = vultrino
@@ -504,19 +540,15 @@ impl McpServer {
             credentials.iter().collect()
         };
 
-        // Further filter by credential scopes if authenticated
-        let filtered: Vec<&CredentialMetadata> = if let Some(ref auth) = self.auth {
-            filtered
-                .into_iter()
-                .filter(|c| auth.can_access_credential(&c.alias))
-                .collect()
-        } else {
-            filtered
-        };
+        // Filter by credential scopes based on role
+        let filtered: Vec<&CredentialMetadata> = filtered
+            .into_iter()
+            .filter(|c| auth.can_access_credential(&c.alias))
+            .collect();
 
         // Format output
         let output = if filtered.is_empty() {
-            "No credentials found.".to_string()
+            "No credentials found (or none accessible with your API key).".to_string()
         } else {
             let mut lines = vec!["Available credentials:".to_string()];
             for cred in filtered {
@@ -541,16 +573,13 @@ impl McpServer {
         &self,
         args: serde_json::Value,
     ) -> Result<Vec<ToolContent>, String> {
-        // Check execute permission
-        self.check_permission(Permission::Execute)
-            .map_err(|(_, msg)| msg)?;
-
         let args: HttpRequestArgs =
-            serde_json::from_value(args).map_err(|e| format!("Invalid arguments: {}", e))?;
+            serde_json::from_value(args).map_err(|e| format!("Invalid arguments: {}. api_key is required.", e))?;
 
-        // Check credential access
-        self.check_credential_access(&args.credential)
-            .map_err(|(_, msg)| msg)?;
+        // Validate API key and check permissions
+        let auth = self.validate_api_key(&args.api_key).await?;
+        Self::check_permission(&auth, Permission::Execute)?;
+        Self::check_credential_access(&auth, &args.credential)?;
 
         // Build execute request
         let request = ExecuteRequest {
@@ -568,7 +597,7 @@ impl McpServer {
         // Execute through Vultrino with auth context
         let vultrino = self.vultrino.read().await;
         let response = vultrino
-            .execute_with_auth(request, self.auth.as_ref())
+            .execute_with_auth(request, Some(&auth))
             .await
             .map_err(|e| format!("Request failed: {}", e))?;
 
@@ -596,16 +625,13 @@ impl McpServer {
         &self,
         args: serde_json::Value,
     ) -> Result<Vec<ToolContent>, String> {
-        // Check read permission
-        self.check_permission(Permission::Read)
-            .map_err(|(_, msg)| msg)?;
-
         let args: GetCredentialInfoArgs =
-            serde_json::from_value(args).map_err(|e| format!("Invalid arguments: {}", e))?;
+            serde_json::from_value(args).map_err(|e| format!("Invalid arguments: {}. api_key is required.", e))?;
 
-        // Check credential access
-        self.check_credential_access(&args.credential)
-            .map_err(|(_, msg)| msg)?;
+        // Validate API key and check permissions
+        let auth = self.validate_api_key(&args.api_key).await?;
+        Self::check_permission(&auth, Permission::Read)?;
+        Self::check_credential_access(&auth, &args.credential)?;
 
         let vultrino = self.vultrino.read().await;
 

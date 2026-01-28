@@ -130,6 +130,34 @@ impl FileStorage {
         })
     }
 
+    /// Reload data from disk (for picking up external changes)
+    pub async fn reload(&self) -> Result<(), StorageError> {
+        let content = fs::read_to_string(&self.path).await?;
+        let storage_file: StorageFile = serde_json::from_str(&content)
+            .map_err(|e| StorageError::Serialization(e.to_string()))?;
+
+        // Decrypt data
+        let decrypted = decrypt(&storage_file.data, &self.master_key)?;
+
+        // Parse as StorageCache
+        let cache: StorageCache = serde_json::from_slice(&decrypted)
+            .or_else(|_| {
+                // Try old format: just a HashMap of credentials
+                let credentials: HashMap<String, Credential> = serde_json::from_slice(&decrypted)
+                    .map_err(|e| StorageError::Serialization(e.to_string()))?;
+                Ok::<_, StorageError>(StorageCache {
+                    credentials,
+                    roles: HashMap::new(),
+                    api_keys: HashMap::new(),
+                })
+            })?;
+
+        // Update cache
+        *self.cache.write() = cache;
+
+        Ok(())
+    }
+
     /// Save the current state to disk
     async fn save(&self) -> Result<(), StorageError> {
         let data = {
@@ -327,6 +355,11 @@ impl StorageBackend for FileStorage {
         }
 
         self.save().await
+    }
+
+    async fn reload(&self) -> Result<(), StorageError> {
+        // Call the inherent reload method
+        FileStorage::reload(self).await
     }
 }
 

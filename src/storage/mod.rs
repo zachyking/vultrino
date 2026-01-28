@@ -100,4 +100,10 @@ pub trait StorageBackend: Send + Sync {
 
     /// Update an API key's last used timestamp
     async fn update_api_key_last_used(&self, id: &str) -> Result<(), StorageError>;
+
+    /// Reload data from underlying storage
+    /// Default implementation does nothing (for in-memory stores)
+    async fn reload(&self) -> Result<(), StorageError> {
+        Ok(())
+    }
 }

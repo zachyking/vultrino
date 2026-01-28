@@ -253,7 +253,9 @@ pub struct ListCredentialsArgs {
 /// Arguments for http_request tool
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HttpRequestArgs {
-    /// Credential alias to use for authentication
+    /// Vultrino API key for authentication
+    pub api_key: String,
+    /// Credential alias to use for the request
     pub credential: String,
     /// HTTP method (GET, POST, PUT, DELETE, etc.)
     pub method: String,
@@ -273,6 +275,8 @@ pub struct HttpRequestArgs {
 /// Arguments for get_credential_info tool
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GetCredentialInfoArgs {
+    /// Vultrino API key for authentication
+    pub api_key: String,
     /// Credential alias or ID
     pub credential: String,
 }

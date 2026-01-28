@@ -23,13 +23,13 @@ Vultrino solves this by:
 The Model Context Protocol provides native AI integration:
 
 ```bash
-vultrino serve --mcp
+vultrino mcp
 ```
 
 **Pros:**
 - Native protocol for AI tools
 - Rich tool descriptions
-- Session management
+- Scoped access via API key authentication
 - Best security isolation
 
 **Setup:**
@@ -105,7 +105,7 @@ For Claude Desktop MCP:
   "mcpServers": {
     "vultrino": {
       "command": "/path/to/vultrino",
-      "args": ["serve", "--mcp"],
+      "args": ["mcp"],
       "env": {
         "VULTRINO_PASSWORD": "your-password"
       }
@@ -114,13 +114,34 @@ For Claude Desktop MCP:
 }
 ```
 
+### Step 5: Configure Agent with API Key
+
+Add to your AI agent's system prompt:
+```
+When using Vultrino tools, always include your API key in every tool call:
+
+For listing credentials:
+{"tool": "list_credentials", "arguments": {"api_key": "vk_your_generated_key_here"}}
+
+For making requests:
+{"tool": "http_request", "arguments": {"api_key": "vk_your_generated_key_here", "credential": "...", ...}}
+```
+
+**Important:** Every tool call requires the `api_key` parameter. This enables multiple agents to share the same MCP server with different scoped access.
+
 ## Example Interactions
 
 ### Listing Available Credentials
 
 **User:** "What APIs can you access?"
 
-**AI:** *calls list_credentials*
+**AI:** *calls list_credentials with api_key*
+```json
+{
+  "tool": "list_credentials",
+  "arguments": {"api_key": "vk_..."}
+}
+```
 
 **AI:** "I have access to:
 - `github-api` — GitHub API for repo access
@@ -130,12 +151,16 @@ For Claude Desktop MCP:
 
 **User:** "Check my GitHub notifications"
 
-**AI:** *calls http_request with credential=github-api*
+**AI:** *calls http_request with api_key and credential*
 ```json
 {
-  "credential": "github-api",
-  "method": "GET",
-  "url": "https://api.github.com/notifications"
+  "tool": "http_request",
+  "arguments": {
+    "api_key": "vk_...",
+    "credential": "github-api",
+    "method": "GET",
+    "url": "https://api.github.com/notifications"
+  }
 }
 ```
 

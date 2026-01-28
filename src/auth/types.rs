@@ -117,6 +117,12 @@ impl Role {
         }
     }
 
+    /// Create a role with a specific ID (for predefined roles with stable IDs)
+    pub fn with_id(mut self, id: impl Into<String>) -> Self {
+        self.id = id.into();
+        self
+    }
+
     /// Add a description to the role
     pub fn with_description(mut self, description: impl Into<String>) -> Self {
         self.description = Some(description.into());
@@ -228,7 +234,7 @@ impl From<&ApiKey> for ApiKeyMetadata {
     }
 }
 
-/// Predefined role names
+/// Predefined role names (also used as stable IDs)
 pub const ROLE_ADMIN: &str = "admin";
 pub const ROLE_READ_ONLY: &str = "read-only";
 pub const ROLE_EXECUTOR: &str = "executor";
@@ -236,12 +242,14 @@ pub const ROLE_EXECUTOR: &str = "executor";
 /// Create the predefined admin role (full access)
 pub fn admin_role() -> Role {
     Role::new(ROLE_ADMIN, Permission::all())
+        .with_id(ROLE_ADMIN) // Use name as stable ID
         .with_description("Full administrative access to all credentials")
 }
 
 /// Create the predefined read-only role
 pub fn read_only_role() -> Role {
     Role::new(ROLE_READ_ONLY, [Permission::Read].into_iter().collect())
+        .with_id(ROLE_READ_ONLY) // Use name as stable ID
         .with_description("Read-only access to credential metadata")
 }
 
@@ -251,6 +259,7 @@ pub fn executor_role() -> Role {
         ROLE_EXECUTOR,
         [Permission::Read, Permission::Execute].into_iter().collect(),
     )
+    .with_id(ROLE_EXECUTOR) // Use name as stable ID
     .with_description("Execute credentials without management access")
 }
 

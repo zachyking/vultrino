@@ -26,7 +26,19 @@ Vultrino's Role-Based Access Control (RBAC) system lets you create scoped API ke
 | `delete` | Remove credentials |
 | `execute` | Use credentials for authenticated requests |
 
-## Creating Roles
+## Predefined Roles
+
+Vultrino includes three predefined roles that are always available:
+
+| Role | Permissions | Use Case |
+|------|-------------|----------|
+| `admin` | read, write, update, delete, execute | Full administrative access |
+| `executor` | read, execute | AI agents and applications (recommended) |
+| `read-only` | read | Monitoring and listing credentials only |
+
+These roles cannot be deleted and are available immediately after init.
+
+## Creating Custom Roles
 
 ### Basic Role
 
@@ -154,14 +166,58 @@ Revocation is immediate. Any requests using the key will fail.
 
 ## Using API Keys
 
-### HTTP Proxy
+### CLI with API Key (No Password Required)
+
+Once `vultrino web` is running, use CLI commands with just an API key:
+
+```bash
+# Make request using API key (no VULTRINO_PASSWORD needed)
+vultrino --key vk_a1b2c3d4... request github-api https://api.github.com/user
+```
+
+This connects to the running web server's API at `http://127.0.0.1:7879`.
+
+### MCP Server (Per-Request Auth)
+
+Every MCP tool call requires the API key:
+
+```json
+{
+  "tool": "list_credentials",
+  "arguments": {
+    "api_key": "vk_a1b2c3d4..."
+  }
+}
+```
+
+```json
+{
+  "tool": "http_request",
+  "arguments": {
+    "api_key": "vk_a1b2c3d4...",
+    "credential": "github-api",
+    "method": "GET",
+    "url": "https://api.github.com/user"
+  }
+}
+```
+
+This allows multiple AI agents to use the same MCP server with different scoped keys.
+
+### HTTP API
 
 Include the API key in the Authorization header:
 
 ```bash
-curl -H "Authorization: Bearer vk_a1b2c3d4e5f6g7h8i9j0k1l2m3n4o5p6" \
-     -H "X-Vultrino-Credential: github-api" \
-     http://localhost:7878/https://api.github.com/user
+# List credentials
+curl -H "Authorization: Bearer vk_a1b2c3d4..." \
+     http://localhost:7879/api/v1/credentials
+
+# Execute request
+curl -X POST http://localhost:7879/api/v1/execute \
+     -H "Authorization: Bearer vk_a1b2c3d4..." \
+     -H "Content-Type: application/json" \
+     -d '{"credential": "github-api", "method": "GET", "url": "https://api.github.com/user"}'
 ```
 
 ### Application Configuration
@@ -178,11 +234,16 @@ import os
 import requests
 
 api_key = os.environ["VULTRINO_API_KEY"]
-response = requests.get(
-    "http://vultrino:7878/https://api.github.com/user",
+response = requests.post(
+    "http://vultrino:7879/api/v1/execute",
     headers={
         "Authorization": f"Bearer {api_key}",
-        "X-Vultrino-Credential": "github-api"
+        "Content-Type": "application/json"
+    },
+    json={
+        "credential": "github-api",
+        "method": "GET",
+        "url": "https://api.github.com/user"
     }
 )
 ```

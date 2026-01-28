@@ -36,6 +36,10 @@ struct Cli {
     #[arg(short, long, action = clap::ArgAction::Count, global = true)]
     verbose: u8,
 
+    /// API key for scoped access (still requires VULTRINO_PASSWORD for storage)
+    #[arg(short, long, global = true)]
+    key: Option<String>,
+
     #[command(subcommand)]
     command: Commands,
 }
@@ -407,7 +411,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             headers,
             quiet,
         } => {
-            make_request(config, credential, url, method, data, headers, quiet).await?;
+            make_request(config, credential, url, method, data, headers, quiet, cli.key).await?;
         }
         Commands::Action {
             credential,
@@ -509,8 +513,13 @@ async fn run_server(config: Config, bind: String) -> Result<(), Box<dyn std::err
 
 /// Run the MCP server for LLM integration
 async fn run_mcp_server(config: Config) -> Result<(), Box<dyn std::error::Error>> {
-    // Disable normal logging for MCP mode (we communicate via stdio)
     let storage = init_storage(&config).await?;
+
+    // Load auth manager for API key validation
+    let stored_roles = storage.list_roles().await?;
+    let stored_keys = storage.list_api_keys().await?;
+    let auth_manager = Arc::new(RwLock::new(AuthManager::from_data(stored_roles, stored_keys)));
+
     let resolver = CredentialResolver::new(storage.clone());
     let server = VultrinoServer::new(config, storage, resolver);
 
@@ -520,7 +529,7 @@ async fn run_mcp_server(config: Config) -> Result<(), Box<dyn std::error::Error>
     }
 
     let vultrino = Arc::new(RwLock::new(server));
-    let mut mcp = McpServer::new(vultrino);
+    let mut mcp = McpServer::new(vultrino, auth_manager);
 
     mcp.run_stdio().await?;
 
@@ -1183,10 +1192,10 @@ async fn revoke_api_key(config: Config, id: String) -> Result<(), Box<dyn std::e
     let storage = init_storage(&config).await?;
     let keys = storage.list_api_keys().await?;
 
-    // Find key by ID or prefix
+    // Find key by ID, prefix, or name
     let key = keys
         .iter()
-        .find(|k| k.id == id || k.key_prefix.contains(&id))
+        .find(|k| k.id == id || k.key_prefix.contains(&id) || k.name == id)
         .ok_or_else(|| format!("API key '{}' not found", id))?;
 
     let key_name = key.name.clone();
@@ -1201,6 +1210,9 @@ async fn revoke_api_key(config: Config, id: String) -> Result<(), Box<dyn std::e
 // ==================== HTTP Request ====================
 
 /// Make an authenticated HTTP request
+///
+/// If `api_key` is provided, connects to a running Vultrino server via HTTP API.
+/// Otherwise, uses direct storage access (requires VULTRINO_PASSWORD).
 async fn make_request(
     config: Config,
     credential: String,
@@ -1209,36 +1221,43 @@ async fn make_request(
     data: Option<String>,
     headers: Vec<String>,
     quiet: bool,
+    api_key: Option<String>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let storage = init_storage(&config).await?;
-    let resolver = CredentialResolver::new(storage.clone());
-    let server = VultrinoServer::new(config, storage, resolver);
-
-    // Load installed plugins
-    server.load_plugins().await?;
-
     // Parse headers
     let mut headers_map = std::collections::HashMap::new();
-    for header in headers {
+    for header in &headers {
         if let Some((key, value)) = header.split_once(':') {
             headers_map.insert(key.trim().to_string(), value.trim().to_string());
         }
     }
 
     // Parse body - support @filename syntax
-    let body: Option<serde_json::Value> = if let Some(data_str) = data {
+    let body: Option<serde_json::Value> = if let Some(data_str) = &data {
         if data_str.starts_with('@') {
             // Read from file
             let filename = &data_str[1..];
             let content = tokio::fs::read_to_string(filename).await?;
             Some(serde_json::from_str(&content)?)
         } else {
-            // Parse as JSON
-            Some(serde_json::from_str(&data_str)?)
+            // Parse as JSON or treat as string
+            serde_json::from_str(data_str).ok().or_else(|| Some(serde_json::Value::String(data_str.clone())))
         }
     } else {
         None
     };
+
+    // If API key is provided, use HTTP API (no password needed)
+    if let Some(key) = api_key {
+        return make_request_via_api(&config, &credential, &url, &method, headers_map, body, quiet, &key).await;
+    }
+
+    // Otherwise, use direct storage access (requires password)
+    let storage = init_storage(&config).await?;
+    let resolver = CredentialResolver::new(storage.clone());
+    let server = VultrinoServer::new(config, storage, resolver);
+
+    // Load installed plugins
+    server.load_plugins().await?;
 
     // Build request
     let request = ExecuteRequest {
@@ -1256,24 +1275,91 @@ async fn make_request(
     let response = server.execute(request).await?;
 
     // Output
+    output_response(&method, &url, response.status, &response.body, quiet)?;
+
+    Ok(())
+}
+
+/// Make request via HTTP API (connects to running Vultrino server)
+async fn make_request_via_api(
+    _config: &Config,
+    credential: &str,
+    url: &str,
+    method: &str,
+    headers: std::collections::HashMap<String, String>,
+    body: Option<serde_json::Value>,
+    quiet: bool,
+    api_key: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    // Determine API server address (default to web server port)
+    let api_url = std::env::var("VULTRINO_API_URL")
+        .unwrap_or_else(|_| "http://127.0.0.1:7879".to_string());
+
+    // Build the API request
+    let client = reqwest::Client::new();
+    let api_response = client
+        .post(format!("{}/api/v1/execute", api_url))
+        .header("Authorization", format!("Bearer {}", api_key))
+        .header("Content-Type", "application/json")
+        .json(&serde_json::json!({
+            "credential": credential,
+            "method": method.to_uppercase(),
+            "url": url,
+            "headers": headers,
+            "body": body,
+        }))
+        .send()
+        .await
+        .map_err(|e| {
+            if e.is_connect() {
+                format!(
+                    "Cannot connect to Vultrino server at {}. \n\
+                    Make sure `vultrino web` is running, or use without --key to access storage directly.",
+                    api_url
+                )
+            } else {
+                e.to_string()
+            }
+        })?;
+
+    if !api_response.status().is_success() {
+        let status = api_response.status();
+        let error_body = api_response.text().await.unwrap_or_default();
+        return Err(format!("API error ({}): {}", status, error_body).into());
+    }
+
+    // Parse API response
+    let result: serde_json::Value = api_response.json().await?;
+
+    let status = result["status"].as_u64().unwrap_or(0) as u16;
+    let response_body = result["body"].as_str().unwrap_or("");
+
+    // Output
+    output_response(method, url, status, response_body.as_bytes(), quiet)?;
+
+    Ok(())
+}
+
+/// Output response to console
+fn output_response(method: &str, url: &str, status: u16, body: &[u8], quiet: bool) -> Result<(), Box<dyn std::error::Error>> {
     if quiet {
         // Just the body
-        let body_text = String::from_utf8_lossy(&response.body);
+        let body_text = String::from_utf8_lossy(body);
         print!("{}", body_text);
     } else {
         // Status and body
-        let status_emoji = if response.status >= 200 && response.status < 300 {
+        let status_emoji = if status >= 200 && status < 300 {
             "+"
-        } else if response.status >= 400 {
+        } else if status >= 400 {
             "!"
         } else {
             ">"
         };
 
-        eprintln!("[{}] {} {} -> {}", status_emoji, method.to_uppercase(), url, response.status);
+        eprintln!("[{}] {} {} -> {}", status_emoji, method.to_uppercase(), url, status);
 
         // Pretty print JSON if possible
-        let body_text = String::from_utf8_lossy(&response.body);
+        let body_text = String::from_utf8_lossy(body);
         if let Ok(json) = serde_json::from_str::<serde_json::Value>(&body_text) {
             println!("{}", serde_json::to_string_pretty(&json)?);
         } else {

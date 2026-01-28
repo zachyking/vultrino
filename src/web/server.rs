@@ -14,6 +14,7 @@ use tower_http::services::ServeDir;
 use tower_http::trace::TraceLayer;
 use tower_sessions::{MemoryStore, SessionManagerLayer};
 
+use super::api;
 use super::auth::AdminAuth;
 use super::routes;
 
@@ -120,8 +121,12 @@ impl WebServer {
             .route("/keys/new", post(routes::key_create))
             .route("/keys/{id}/revoke", post(routes::key_revoke))
             .route("/audit", get(routes::audit_log))
-            // API endpoints for HTMX
+            // API endpoints for HTMX (web UI)
             .route("/api/stats", get(routes::api_stats))
+            // JSON API endpoints (API key auth for CLI/external apps)
+            .route("/api/v1/health", get(api::api_health))
+            .route("/api/v1/credentials", get(api::api_list_credentials))
+            .route("/api/v1/execute", post(api::api_execute))
             // Static files
             .nest_service("/static", static_dir)
             // Layers

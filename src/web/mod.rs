@@ -4,7 +4,10 @@
 //! - Credentials
 //! - Roles and API keys
 //! - Audit logs and statistics
+//!
+//! Also provides a JSON API for CLI and external applications using API key auth.
 
+mod api;
 mod auth;
 mod routes;
 mod server;

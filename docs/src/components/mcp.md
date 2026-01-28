@@ -24,10 +24,31 @@ MCP is a protocol for AI assistants to interact with external tools and services
 
 ```bash
 export VULTRINO_PASSWORD="your-password"
-vultrino serve --mcp
+vultrino mcp
 ```
 
 The MCP server uses stdio transport, communicating via stdin/stdout.
+
+## API Key Authentication
+
+AI agents authenticate by calling the `authenticate` tool with their API key:
+
+```json
+{
+  "tool": "authenticate",
+  "arguments": {
+    "api_key": "vk_your_api_key_here"
+  }
+}
+```
+
+**Authentication flow:**
+1. Admin creates API key: `vultrino key create ai-agent --role executor`
+2. MCP server starts with storage password
+3. AI agent calls `authenticate` tool with its API key
+4. Server validates key and scopes subsequent requests to the key's role
+
+**Without authentication:** Full access (for local development). In production, always have agents authenticate first.
 
 ## Configuring AI Clients
 
@@ -40,7 +61,7 @@ Add to `~/Library/Application Support/Claude/claude_desktop_config.json`:
   "mcpServers": {
     "vultrino": {
       "command": "/path/to/vultrino",
-      "args": ["serve", "--mcp"],
+      "args": ["mcp"],
       "env": {
         "VULTRINO_PASSWORD": "your-password"
       }
@@ -58,7 +79,7 @@ Add to your MCP configuration:
   "mcpServers": {
     "vultrino": {
       "command": "vultrino",
-      "args": ["serve", "--mcp"],
+      "args": ["mcp"],
       "env": {
         "VULTRINO_PASSWORD": "your-password"
       }
@@ -66,6 +87,8 @@ Add to your MCP configuration:
   }
 }
 ```
+
+**Important:** For scoped access, the AI agent should call the `authenticate` tool with its API key as the first action. Without authentication, the agent has full access to all credentials.
 
 ### Generic MCP Client
 
@@ -75,9 +98,9 @@ import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js"
 
 const transport = new StdioClientTransport({
   command: "vultrino",
-  args: ["serve", "--mcp"],
+  args: ["mcp"],
   env: {
-    VULTRINO_PASSWORD: "your-password"
+    VULTRINO_PASSWORD: process.env.VULTRINO_PASSWORD
   }
 });
 
@@ -87,6 +110,11 @@ const client = new Client({
 });
 
 await client.connect(transport);
+
+// Authenticate with API key for scoped access
+await client.callTool("authenticate", {
+  api_key: process.env.VULTRINO_API_KEY
+});
 ```
 
 ## Available Tools

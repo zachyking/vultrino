@@ -37,6 +37,7 @@ curl -H "X-Vultrino-Credential: <alias>" \
 {
   "tool": "http_request",
   "arguments": {
+    "api_key": "vk_your_api_key_here",
     "credential": "<alias>",
     "method": "GET",
     "url": "https://target-api.com/endpoint"
@@ -44,9 +45,9 @@ curl -H "X-Vultrino-Credential: <alias>" \
 }
 ```
 
-**Via CLI:**
+**Via CLI (requires running Vultrino web server):**
 ```bash
-vultrino request -c <alias> https://target-api.com/endpoint
+vultrino --key vk_your_api_key request <alias> https://target-api.com/endpoint
 ```
 
 ### MCP Tools Summary
@@ -55,8 +56,9 @@ vultrino request -c <alias> https://target-api.com/endpoint
 |------|---------|---------------------|
 | `list_credentials` | List available credentials | read |
 | `http_request` | Make authenticated request | execute |
-| `add_credential` | Store new credential | write |
-| `delete_credential` | Remove credential | delete |
+| `get_credential_info` | Get credential metadata | read |
+
+**Important:** Every tool call requires an `api_key` parameter for authentication.
 
 ### Common Credential Aliases
 
@@ -69,10 +71,17 @@ Typical naming patterns:
 
 ## For AI Agents
 
+**Authentication Model:** Every tool call requires your API key. This enables multiple agents to use the same MCP server with different scoped keys.
+
 ### Step 1: Check Available Credentials
 
 ```json
-{"tool": "list_credentials", "arguments": {}}
+{
+  "tool": "list_credentials",
+  "arguments": {
+    "api_key": "vk_your_api_key_here"
+  }
+}
 ```
 
 Response:
@@ -91,6 +100,7 @@ Response:
 {
   "tool": "http_request",
   "arguments": {
+    "api_key": "vk_your_api_key_here",
     "credential": "github-api",
     "method": "GET",
     "url": "https://api.github.com/user"
@@ -165,15 +175,43 @@ Content-Type: application/json
 
 1. **Credentials encrypted at rest** — AES-256-GCM
 2. **Aliases only** — Never expose actual secrets
-3. **RBAC** — Role-based access control
+3. **RBAC** — Role-based access control via API keys
 4. **Policies** — URL/method restrictions
 5. **Audit logging** — Track all usage
+
+## API Key Authentication
+
+Vultrino uses **per-request API key authentication**. Include your API key in every tool call:
+
+```json
+{
+  "tool": "list_credentials",
+  "arguments": {
+    "api_key": "vk_your_api_key_here"
+  }
+}
+```
+
+This design enables:
+- **Multiple agents** using the same MCP server with different keys
+- **Scoped access** - each key has its own permissions and credential access
+- **No session state** - stateless, secure by default
+
+The API key determines what credentials you can access based on your assigned role:
+
+| Role | Permissions | Use Case |
+|------|-------------|----------|
+| `executor` | read, execute | AI agents (recommended) |
+| `read-only` | read | Listing credentials only |
+| `admin` | all | Full administrative access |
+
+**Every tool call requires the `api_key` parameter.**
 
 ## Common Tasks
 
 ### "List my credentials"
 ```json
-{"tool": "list_credentials", "arguments": {}}
+{"tool": "list_credentials", "arguments": {"api_key": "vk_..."}}
 ```
 
 ### "Get my GitHub user info"
@@ -181,6 +219,7 @@ Content-Type: application/json
 {
   "tool": "http_request",
   "arguments": {
+    "api_key": "vk_...",
     "credential": "github-api",
     "method": "GET",
     "url": "https://api.github.com/user"
@@ -193,6 +232,7 @@ Content-Type: application/json
 {
   "tool": "http_request",
   "arguments": {
+    "api_key": "vk_...",
     "credential": "stripe-api",
     "method": "POST",
     "url": "https://api.stripe.com/v1/customers",
@@ -207,6 +247,7 @@ Content-Type: application/json
 {
   "tool": "http_request",
   "arguments": {
+    "api_key": "vk_...",
     "credential": "github-api",
     "method": "GET",
     "url": "https://api.github.com/user/repos"
