@@ -1,0 +1,13 @@
+{% extends "base.html" %}
+
+{% block title %}Error {{ status_code }} - Vultrino{% endblock %}
+
+{% block body %}
+<div class="error-container">
+    <div class="error-content">
+        <h1 class="error-code">{{ status_code }}</h1>
+        <p class="error-message">{{ message }}</p>
+        <a href="/" class="btn btn-primary">Go to Dashboard</a>
+    </div>
+</div>
+{% endblock %}

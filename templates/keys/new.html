@@ -1,0 +1,61 @@
+{% extends "layout.html" %}
+
+{% block title %}Create API Key - Vultrino{% endblock %}
+{% block nav_keys %}active{% endblock %}
+{% block page_title %}Create API Key{% endblock %}
+
+{% block content %}
+<div class="form-container">
+    {% if let Some(err) = error %}
+    <div class="form-error">
+        {{ err }}
+    </div>
+    {% endif %}
+
+    <form action="/keys/new" method="post" class="form">
+        <div class="form-section">
+            <h3>Key Information</h3>
+
+            <div class="form-group">
+                <label for="name">Name</label>
+                <input type="text" id="name" name="name" required
+                       placeholder="e.g., my-app, development, claude-agent">
+                <p class="form-hint">A descriptive name to identify this key</p>
+            </div>
+
+            <div class="form-group">
+                <label for="role">Role</label>
+                <select id="role" name="role" required>
+                    {% for role in roles %}
+                    <option value="{{ role.name }}">{{ role.name }}{% if !role.description.is_empty() %} - {{ role.description }}{% endif %}</option>
+                    {% endfor %}
+                </select>
+                <p class="form-hint">The role determines what permissions this key has</p>
+            </div>
+
+            <div class="form-group">
+                <label for="expires">Expiration</label>
+                <select id="expires" name="expires">
+                    <option value="never">Never expires</option>
+                    <option value="7d">7 days</option>
+                    <option value="30d">30 days</option>
+                    <option value="90d">90 days</option>
+                    <option value="1y">1 year</option>
+                </select>
+            </div>
+        </div>
+
+        <div class="form-section">
+            <div class="info-card">
+                <h4>Important</h4>
+                <p>The API key will only be shown once after creation. Make sure to copy it to a secure location.</p>
+            </div>
+        </div>
+
+        <div class="form-actions">
+            <a href="/keys" class="btn btn-secondary">Cancel</a>
+            <button type="submit" class="btn btn-primary">Create API Key</button>
+        </div>
+    </form>
+</div>
+{% endblock %}

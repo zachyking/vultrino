@@ -1,0 +1,270 @@
+//! Vultrino server implementation
+//!
+//! Provides JSON API mode for execute requests.
+
+use crate::auth::{AuthManager, AuthResult, Permission};
+use crate::config::Config;
+use crate::plugins::PluginRegistry;
+use crate::policy::PolicyEngine;
+use crate::router::CredentialResolver;
+use crate::storage::StorageBackend;
+use crate::{ExecuteRequest, ExecuteResponse, RequestContext, VultrinoError};
+use std::sync::Arc;
+use tracing::info;
+
+/// Main Vultrino server
+pub struct VultrinoServer {
+    /// Configuration
+    config: Config,
+    /// Credential resolver
+    resolver: CredentialResolver,
+    /// Plugin registry
+    plugins: Arc<PluginRegistry>,
+    /// Policy engine
+    policy_engine: Arc<PolicyEngine>,
+    /// Storage backend
+    storage: Arc<dyn StorageBackend>,
+    /// Authentication manager
+    auth_manager: Arc<AuthManager>,
+    /// Whether authentication is required
+    require_auth: bool,
+}
+
+impl VultrinoServer {
+    /// Create a new Vultrino server
+    pub fn new(
+        config: Config,
+        storage: Arc<dyn StorageBackend>,
+        resolver: CredentialResolver,
+    ) -> Self {
+        let plugins = Arc::new(PluginRegistry::new());
+        let policy_engine = Arc::new(PolicyEngine::new());
+        let auth_manager = Arc::new(AuthManager::new());
+
+        // Load policies from config
+        policy_engine.load_policies(config.policies.clone());
+
+        // By default, don't require auth in local mode
+        let require_auth = config.server.mode == crate::config::ServerMode::Server;
+
+        Self {
+            config,
+            resolver,
+            plugins,
+            policy_engine,
+            storage,
+            auth_manager,
+            require_auth,
+        }
+    }
+
+    /// Create a server with a custom auth manager (for loading from storage)
+    pub fn with_auth_manager(mut self, auth_manager: AuthManager) -> Self {
+        self.auth_manager = Arc::new(auth_manager);
+        self
+    }
+
+    /// Set whether authentication is required
+    pub fn with_require_auth(mut self, require: bool) -> Self {
+        self.require_auth = require;
+        self
+    }
+
+    /// Load all installed WASM plugins
+    pub async fn load_plugins(&self) -> Result<(), VultrinoError> {
+        use crate::plugins::{PluginLoader, PluginInstaller};
+
+        let installer = PluginInstaller::default();
+        let installed = installer.list().await.map_err(|e| {
+            VultrinoError::Plugin(crate::plugins::PluginError::Installation(e.to_string()))
+        })?;
+
+        let loader = PluginLoader::default();
+
+        for info in installed {
+            if !info.enabled {
+                continue;
+            }
+
+            match loader.load_plugin(&info.directory).await {
+                Ok(plugin) => {
+                    tracing::info!(plugin = %info.manifest.plugin.name, "Loaded plugin");
+                    self.plugins.register(plugin);
+                }
+                Err(e) => {
+                    tracing::warn!(plugin = %info.manifest.plugin.name, error = %e, "Failed to load plugin");
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Execute a request through Vultrino
+    pub async fn execute(&self, request: ExecuteRequest) -> Result<ExecuteResponse, VultrinoError> {
+        self.execute_with_auth(request, None).await
+    }
+
+    /// Execute a request with optional authentication
+    pub async fn execute_with_auth(
+        &self,
+        request: ExecuteRequest,
+        auth: Option<&AuthResult>,
+    ) -> Result<ExecuteResponse, VultrinoError> {
+        let mut context = RequestContext::new();
+
+        // Add auth info to context if available
+        if let Some(auth_result) = auth {
+            context = context.with_auth(auth_result);
+
+            // Check permission to execute
+            if !auth_result.has_permission(Permission::Execute) {
+                return Err(VultrinoError::PolicyDenied(
+                    "Missing 'execute' permission".to_string(),
+                ));
+            }
+
+            // Check credential scope
+            if !auth_result.can_access_credential(&request.credential) {
+                return Err(VultrinoError::PolicyDenied(format!(
+                    "Access denied to credential: {}",
+                    request.credential
+                )));
+            }
+        }
+
+        // Resolve credential
+        let credential = self.resolver.resolve(&request.credential).await?;
+
+        // Parse action to get plugin and action name
+        let (plugin_name, action_name) = parse_action(&request.action)?;
+
+        // Get plugin
+        let plugin = self
+            .plugins
+            .get(plugin_name)
+            .ok_or_else(|| VultrinoError::Plugin(crate::plugins::PluginError::NotFound(plugin_name.to_string())))?;
+
+        // Extract URL for policy evaluation (if HTTP request)
+        let url = request
+            .params
+            .get("url")
+            .and_then(|v| v.as_str());
+        let method = request
+            .params
+            .get("method")
+            .and_then(|v| v.as_str());
+
+        // Evaluate policy
+        let decision = self.policy_engine.evaluate(
+            &credential.alias,
+            url,
+            method,
+            &context,
+        );
+
+        match decision {
+            crate::policy::PolicyDecision::Allow => {}
+            crate::policy::PolicyDecision::Deny(reason) => {
+                return Err(VultrinoError::PolicyDenied(reason));
+            }
+            crate::policy::PolicyDecision::Prompt => {
+                // Future: implement interactive prompting
+                return Err(VultrinoError::PolicyDenied(
+                    "Request requires user approval (not implemented)".to_string(),
+                ));
+            }
+        }
+
+        // Validate params
+        plugin.validate_params(action_name, &request.params)?;
+
+        // Execute through plugin
+        let request_id = context.request_id.clone();
+        let plugin_request = crate::plugins::PluginRequest {
+            credential,
+            action: action_name.to_string(),
+            params: request.params.clone(),
+            context,
+        };
+
+        let response = plugin.execute(plugin_request).await?;
+
+        // Record for rate limiting
+        self.policy_engine.record_request(&request.credential);
+
+        // Audit log
+        info!(
+            request_id = %request_id,
+            credential = %request.credential,
+            action = %request.action,
+            status = response.status,
+            api_key = auth.map(|a| a.api_key.name.as_str()),
+            "Request executed"
+        );
+
+        Ok(response)
+    }
+
+    /// Get a reference to the storage backend
+    pub fn storage(&self) -> &Arc<dyn StorageBackend> {
+        &self.storage
+    }
+
+    /// Get a reference to the plugin registry
+    pub fn plugins(&self) -> &Arc<PluginRegistry> {
+        &self.plugins
+    }
+
+    /// Get a reference to the policy engine
+    pub fn policy_engine(&self) -> &Arc<PolicyEngine> {
+        &self.policy_engine
+    }
+
+    /// Get the server configuration
+    pub fn config(&self) -> &Config {
+        &self.config
+    }
+
+    /// Get a reference to the auth manager
+    pub fn auth_manager(&self) -> &Arc<AuthManager> {
+        &self.auth_manager
+    }
+
+    /// Check if authentication is required
+    pub fn requires_auth(&self) -> bool {
+        self.require_auth
+    }
+}
+
+/// Parse action string into plugin name and action name
+/// Format: "plugin.action" or just "action" (defaults to http plugin)
+fn parse_action(action: &str) -> Result<(&str, &str), VultrinoError> {
+    if let Some((plugin, action)) = action.split_once('.') {
+        Ok((plugin, action))
+    } else {
+        // Default to http plugin
+        Ok(("http", action))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_action() {
+        let (plugin, action) = parse_action("http.request").unwrap();
+        assert_eq!(plugin, "http");
+        assert_eq!(action, "request");
+
+        let (plugin, action) = parse_action("crypto.sign").unwrap();
+        assert_eq!(plugin, "crypto");
+        assert_eq!(action, "sign");
+
+        // Default to http
+        let (plugin, action) = parse_action("request").unwrap();
+        assert_eq!(plugin, "http");
+        assert_eq!(action, "request");
+    }
+}

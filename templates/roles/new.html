@@ -1,0 +1,97 @@
+{% extends "layout.html" %}
+
+{% block title %}Create Role - Vultrino{% endblock %}
+{% block nav_roles %}active{% endblock %}
+{% block page_title %}Create Role{% endblock %}
+
+{% block content %}
+<div class="form-container">
+    {% if let Some(err) = error %}
+    <div class="form-error">
+        {{ err }}
+    </div>
+    {% endif %}
+
+    <form action="/roles/new" method="post" class="form">
+        <div class="form-section">
+            <h3>Role Information</h3>
+
+            <div class="form-group">
+                <label for="name">Name</label>
+                <input type="text" id="name" name="name" required
+                       placeholder="e.g., github-reader, production-executor">
+                <p class="form-hint">A unique identifier for this role</p>
+            </div>
+
+            <div class="form-group">
+                <label for="description">Description (optional)</label>
+                <input type="text" id="description" name="description"
+                       placeholder="What is this role for?">
+            </div>
+        </div>
+
+        <div class="form-section">
+            <h3>Permissions</h3>
+            <p class="form-hint">Select what actions this role can perform</p>
+
+            <div class="checkbox-group">
+                <label class="checkbox-label">
+                    <input type="checkbox" name="permissions" value="read" checked>
+                    <span class="checkbox-text">
+                        <strong>Read</strong>
+                        <span>List credentials and view metadata</span>
+                    </span>
+                </label>
+
+                <label class="checkbox-label">
+                    <input type="checkbox" name="permissions" value="execute">
+                    <span class="checkbox-text">
+                        <strong>Execute</strong>
+                        <span>Use credentials to make authenticated requests</span>
+                    </span>
+                </label>
+
+                <label class="checkbox-label">
+                    <input type="checkbox" name="permissions" value="write">
+                    <span class="checkbox-text">
+                        <strong>Write</strong>
+                        <span>Create new credentials</span>
+                    </span>
+                </label>
+
+                <label class="checkbox-label">
+                    <input type="checkbox" name="permissions" value="update">
+                    <span class="checkbox-text">
+                        <strong>Update</strong>
+                        <span>Modify existing credentials</span>
+                    </span>
+                </label>
+
+                <label class="checkbox-label">
+                    <input type="checkbox" name="permissions" value="delete">
+                    <span class="checkbox-text">
+                        <strong>Delete</strong>
+                        <span>Remove credentials</span>
+                    </span>
+                </label>
+            </div>
+        </div>
+
+        <div class="form-section">
+            <h3>Credential Scopes (optional)</h3>
+
+            <div class="form-group">
+                <label for="scopes">Allowed Credential Patterns</label>
+                <input type="text" id="scopes" name="scopes"
+                       placeholder="e.g., github-*, aws-prod">
+                <p class="form-hint">Comma-separated glob patterns. Leave empty to allow access to all credentials.</p>
+            </div>
+        </div>
+
+        <div class="form-actions">
+            <a href="/roles" class="btn btn-secondary">Cancel</a>
+            <button type="submit" class="btn btn-primary">Create Role</button>
+        </div>
+    </form>
+</div>
+{% endblock %}

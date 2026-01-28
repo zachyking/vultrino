@@ -1,0 +1,193 @@
+//! Policy data structures
+
+use chrono::NaiveTime;
+use serde::{Deserialize, Serialize};
+
+/// A security policy for credential access
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Policy {
+    /// Unique identifier
+    pub id: String,
+    /// Human-readable name
+    pub name: String,
+    /// Pattern for matching credential aliases (glob-style: "github-*", "*")
+    pub credential_pattern: String,
+    /// Rules to evaluate in order
+    pub rules: Vec<PolicyRule>,
+    /// Action when no rules match
+    pub default_action: PolicyAction,
+}
+
+/// A single policy rule
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PolicyRule {
+    /// Condition to evaluate
+    pub condition: PolicyCondition,
+    /// Action to take if condition matches
+    pub action: PolicyAction,
+}
+
+/// Conditions for policy evaluation
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PolicyCondition {
+    /// Match URL pattern (glob-style)
+    UrlMatch(String),
+
+    /// Match HTTP methods
+    MethodMatch(Vec<String>),
+
+    /// Allow only during specific time window
+    TimeWindow {
+        start: NaiveTime,
+        end: NaiveTime,
+    },
+
+    /// Rate limit (requests per window)
+    RateLimit {
+        max: u32,
+        window_secs: u64,
+    },
+
+    /// All conditions must match
+    And(Vec<PolicyCondition>),
+
+    /// Any condition must match
+    Or(Vec<PolicyCondition>),
+
+    /// Negate a condition
+    Not(Box<PolicyCondition>),
+
+    /// Always matches (for default rules)
+    Always,
+}
+
+/// Action to take based on policy evaluation
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PolicyAction {
+    /// Allow the request
+    Allow,
+    /// Deny the request
+    Deny,
+    /// Prompt user for approval (future feature)
+    Prompt,
+}
+
+impl Policy {
+    /// Create a new policy that allows all requests
+    pub fn allow_all(name: impl Into<String>, credential_pattern: impl Into<String>) -> Self {
+        Self {
+            id: uuid::Uuid::new_v4().to_string(),
+            name: name.into(),
+            credential_pattern: credential_pattern.into(),
+            rules: vec![],
+            default_action: PolicyAction::Allow,
+        }
+    }
+
+    /// Create a new policy that denies all requests by default
+    pub fn deny_all(name: impl Into<String>, credential_pattern: impl Into<String>) -> Self {
+        Self {
+            id: uuid::Uuid::new_v4().to_string(),
+            name: name.into(),
+            credential_pattern: credential_pattern.into(),
+            rules: vec![],
+            default_action: PolicyAction::Deny,
+        }
+    }
+
+    /// Add a rule to the policy
+    pub fn with_rule(mut self, condition: PolicyCondition, action: PolicyAction) -> Self {
+        self.rules.push(PolicyRule { condition, action });
+        self
+    }
+}
+
+impl PolicyCondition {
+    /// Create a URL match condition
+    pub fn url(pattern: impl Into<String>) -> Self {
+        Self::UrlMatch(pattern.into())
+    }
+
+    /// Create a method match condition for read-only operations
+    pub fn read_only() -> Self {
+        Self::MethodMatch(vec![
+            "GET".to_string(),
+            "HEAD".to_string(),
+            "OPTIONS".to_string(),
+        ])
+    }
+
+    /// Create a method match condition for write operations
+    pub fn write_methods() -> Self {
+        Self::MethodMatch(vec![
+            "POST".to_string(),
+            "PUT".to_string(),
+            "PATCH".to_string(),
+            "DELETE".to_string(),
+        ])
+    }
+
+    /// Create a rate limit condition
+    pub fn rate_limit(max: u32, window_secs: u64) -> Self {
+        Self::RateLimit { max, window_secs }
+    }
+
+    /// Combine conditions with AND
+    pub fn and(conditions: Vec<PolicyCondition>) -> Self {
+        Self::And(conditions)
+    }
+
+    /// Combine conditions with OR
+    pub fn or(conditions: Vec<PolicyCondition>) -> Self {
+        Self::Or(conditions)
+    }
+
+    /// Negate a condition
+    pub fn not(condition: PolicyCondition) -> Self {
+        Self::Not(Box::new(condition))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_policy_builder() {
+        let policy = Policy::deny_all("github-readonly", "github-*")
+            .with_rule(
+                PolicyCondition::and(vec![
+                    PolicyCondition::url("https://api.github.com/*"),
+                    PolicyCondition::read_only(),
+                ]),
+                PolicyAction::Allow,
+            );
+
+        assert_eq!(policy.name, "github-readonly");
+        assert_eq!(policy.credential_pattern, "github-*");
+        assert_eq!(policy.rules.len(), 1);
+        assert_eq!(policy.default_action, PolicyAction::Deny);
+    }
+
+    #[test]
+    fn test_policy_serialization() {
+        let policy = Policy {
+            id: "test-id".to_string(),
+            name: "test".to_string(),
+            credential_pattern: "*".to_string(),
+            rules: vec![PolicyRule {
+                condition: PolicyCondition::UrlMatch("https://*".to_string()),
+                action: PolicyAction::Allow,
+            }],
+            default_action: PolicyAction::Deny,
+        };
+
+        let json = serde_json::to_string(&policy).unwrap();
+        let parsed: Policy = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(parsed.id, policy.id);
+        assert_eq!(parsed.name, policy.name);
+    }
+}

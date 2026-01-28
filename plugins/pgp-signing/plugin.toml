@@ -1,0 +1,108 @@
+[plugin]
+name = "pgp-signing"
+version = "1.0.0"
+description = "PGP/GPG signing and verification for Vultrino"
+author = "Vultrino"
+format = "wasm"
+wasm_module = "pgp_signing.wasm"
+
+[[credential_types]]
+name = "pgp_key"
+display_name = "PGP/GPG Key"
+
+[[credential_types.fields]]
+name = "private_key"
+label = "Private Key (ASCII Armored)"
+type = "textarea"
+required = true
+secret = true
+help_text = "Paste your ASCII-armored PGP private key (starts with -----BEGIN PGP PRIVATE KEY BLOCK-----)"
+placeholder = "-----BEGIN PGP PRIVATE KEY BLOCK-----\n..."
+
+[[credential_types.fields]]
+name = "passphrase"
+label = "Passphrase"
+type = "password"
+required = false
+secret = true
+help_text = "Passphrase to unlock the private key (leave empty if not encrypted)"
+
+[[credential_types.fields]]
+name = "key_id"
+label = "Key ID"
+type = "text"
+required = false
+secret = false
+help_text = "Optional: specify which key to use if multiple keys in keyring"
+
+[[actions]]
+name = "sign"
+description = "Create a detached PGP signature for data"
+
+[[actions.parameters]]
+name = "data"
+type = "string"
+required = true
+description = "The data to sign (will be treated as UTF-8 text)"
+
+[[actions.parameters]]
+name = "armor"
+type = "boolean"
+required = false
+description = "Output ASCII-armored signature (default: true)"
+
+[[actions]]
+name = "sign_cleartext"
+description = "Create a cleartext signed message"
+
+[[actions.parameters]]
+name = "message"
+type = "string"
+required = true
+description = "The message to sign"
+
+[[actions]]
+name = "verify"
+description = "Verify a PGP signature"
+
+[[actions.parameters]]
+name = "data"
+type = "string"
+required = true
+description = "The original data that was signed"
+
+[[actions.parameters]]
+name = "signature"
+type = "string"
+required = true
+description = "The detached signature to verify"
+
+[[actions]]
+name = "get_public_key"
+description = "Extract the public key from the stored private key"
+
+[[actions.parameters]]
+name = "armor"
+type = "boolean"
+required = false
+description = "Output ASCII-armored public key (default: true)"
+
+[[mcp_tools]]
+name = "pgp_sign"
+action = "sign"
+description = "Sign data with PGP and return the signature"
+
+[[mcp_tools]]
+name = "pgp_sign_cleartext"
+action = "sign_cleartext"
+description = "Create a cleartext signed PGP message"
+
+[[mcp_tools]]
+name = "pgp_verify"
+action = "verify"
+description = "Verify a PGP signature against data"
+
+[[mcp_tools]]
+name = "pgp_get_public_key"
+action = "get_public_key"
+description = "Get the public key associated with the stored private key"

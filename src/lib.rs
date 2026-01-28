@@ -1,0 +1,448 @@
+//! Vultrino - A credential proxy for the AI era
+//!
+//! Vultrino enables AI agents to use credentials without seeing them.
+//! It acts as a secure proxy that injects authentication into requests
+//! while keeping the actual credentials hidden from the AI.
+
+pub mod auth;
+pub mod config;
+pub mod crypto;
+pub mod mcp;
+pub mod plugins;
+pub mod policy;
+pub mod router;
+pub mod server;
+pub mod storage;
+pub mod web;
+
+use chrono::{DateTime, Utc};
+use secrecy::{ExposeSecret, SecretString};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use std::collections::HashMap;
+use std::net::IpAddr;
+use thiserror::Error;
+use uuid::Uuid;
+
+/// Core error types for Vultrino
+#[derive(Error, Debug)]
+pub enum VultrinoError {
+    #[error("Storage error: {0}")]
+    Storage(#[from] storage::StorageError),
+
+    #[error("Plugin error: {0}")]
+    Plugin(#[from] plugins::PluginError),
+
+    #[error("Policy error: {0}")]
+    Policy(#[from] policy::PolicyError),
+
+    #[error("Configuration error: {0}")]
+    Config(#[from] config::ConfigError),
+
+    #[error("Crypto error: {0}")]
+    Crypto(#[from] crypto::CryptoError),
+
+    #[error("Credential not found: {0}")]
+    CredentialNotFound(String),
+
+    #[error("Request denied by policy: {0}")]
+    PolicyDenied(String),
+
+    #[error("Invalid request: {0}")]
+    InvalidRequest(String),
+}
+
+/// The type of credential stored
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum CredentialType {
+    /// Simple API key (e.g., `Authorization: Bearer xxx`)
+    ApiKey,
+    /// OAuth2 credentials with token refresh
+    OAuth2,
+    /// HTTP Basic Authentication
+    BasicAuth,
+    /// Private key for signing (SSH, crypto)
+    PrivateKey,
+    /// Certificate for mTLS
+    Certificate,
+    /// Custom credential type
+    Custom(String),
+}
+
+impl std::fmt::Display for CredentialType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            CredentialType::ApiKey => write!(f, "api_key"),
+            CredentialType::OAuth2 => write!(f, "oauth2"),
+            CredentialType::BasicAuth => write!(f, "basic_auth"),
+            CredentialType::PrivateKey => write!(f, "private_key"),
+            CredentialType::Certificate => write!(f, "certificate"),
+            CredentialType::Custom(name) => write!(f, "custom:{}", name),
+        }
+    }
+}
+
+/// A serializable secret string wrapper
+#[derive(Debug, Clone)]
+pub struct Secret(SecretString);
+
+impl Secret {
+    /// Create a new secret from a string
+    pub fn new(value: impl Into<String>) -> Self {
+        Self(SecretString::from(value.into()))
+    }
+
+    /// Expose the secret value
+    pub fn expose(&self) -> &str {
+        self.0.expose_secret()
+    }
+
+    /// Get the inner SecretString
+    pub fn inner(&self) -> &SecretString {
+        &self.0
+    }
+}
+
+impl From<String> for Secret {
+    fn from(s: String) -> Self {
+        Self::new(s)
+    }
+}
+
+impl From<&str> for Secret {
+    fn from(s: &str) -> Self {
+        Self::new(s)
+    }
+}
+
+impl Serialize for Secret {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        self.0.expose_secret().serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for Secret {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let s = String::deserialize(deserializer)?;
+        Ok(Self::new(s))
+    }
+}
+
+/// The actual credential data (encrypted at rest)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum CredentialData {
+    /// API key authentication
+    ApiKey {
+        /// The API key value
+        key: Secret,
+        /// Header name to use (default: "Authorization")
+        #[serde(default = "default_auth_header")]
+        header_name: String,
+        /// Header value prefix (default: "Bearer ")
+        #[serde(default = "default_bearer_prefix")]
+        header_prefix: String,
+    },
+
+    /// OAuth2 credentials
+    OAuth2 {
+        client_id: String,
+        client_secret: Secret,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        refresh_token: Option<Secret>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        access_token: Option<Secret>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        expires_at: Option<DateTime<Utc>>,
+        token_url: String,
+    },
+
+    /// HTTP Basic Authentication
+    BasicAuth {
+        username: String,
+        password: Secret,
+    },
+
+    /// Private key for signing operations
+    PrivateKey {
+        key_pem: Secret,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        passphrase: Option<Secret>,
+    },
+
+    /// Certificate for mTLS
+    Certificate {
+        cert_pem: String,
+        key_pem: Secret,
+    },
+
+    /// Custom credential data
+    Custom(HashMap<String, Secret>),
+}
+
+fn default_auth_header() -> String {
+    "Authorization".to_string()
+}
+
+fn default_bearer_prefix() -> String {
+    "Bearer ".to_string()
+}
+
+impl CredentialData {
+    /// Get the credential type for this data
+    pub fn credential_type(&self) -> CredentialType {
+        match self {
+            CredentialData::ApiKey { .. } => CredentialType::ApiKey,
+            CredentialData::OAuth2 { .. } => CredentialType::OAuth2,
+            CredentialData::BasicAuth { .. } => CredentialType::BasicAuth,
+            CredentialData::PrivateKey { .. } => CredentialType::PrivateKey,
+            CredentialData::Certificate { .. } => CredentialType::Certificate,
+            CredentialData::Custom(_) => CredentialType::Custom("custom".to_string()),
+        }
+    }
+}
+
+/// A stored credential
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Credential {
+    /// Unique identifier
+    pub id: String,
+    /// Human-readable alias (e.g., "github-api")
+    pub alias: String,
+    /// Type of credential
+    pub credential_type: CredentialType,
+    /// The actual credential data
+    pub data: CredentialData,
+    /// Additional metadata
+    #[serde(default)]
+    pub metadata: HashMap<String, String>,
+    /// When the credential was created
+    pub created_at: DateTime<Utc>,
+    /// When the credential was last updated
+    pub updated_at: DateTime<Utc>,
+}
+
+impl Credential {
+    /// Create a new credential with generated ID and timestamps
+    pub fn new(alias: String, data: CredentialData) -> Self {
+        let now = Utc::now();
+        Self {
+            id: Uuid::new_v4().to_string(),
+            alias,
+            credential_type: data.credential_type(),
+            data,
+            metadata: HashMap::new(),
+            created_at: now,
+            updated_at: now,
+        }
+    }
+
+    /// Add metadata to the credential
+    pub fn with_metadata(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
+        self.metadata.insert(key.into(), value.into());
+        self
+    }
+}
+
+/// Credential metadata (without sensitive data) for listing
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CredentialMetadata {
+    pub id: String,
+    pub alias: String,
+    pub credential_type: CredentialType,
+    pub metadata: HashMap<String, String>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+impl From<&Credential> for CredentialMetadata {
+    fn from(cred: &Credential) -> Self {
+        Self {
+            id: cred.id.clone(),
+            alias: cred.alias.clone(),
+            credential_type: cred.credential_type.clone(),
+            metadata: cred.metadata.clone(),
+            created_at: cred.created_at,
+            updated_at: cred.updated_at,
+        }
+    }
+}
+
+/// Context for a request being processed
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RequestContext {
+    /// Unique request identifier
+    pub request_id: String,
+    /// When the request was received
+    pub timestamp: DateTime<Utc>,
+    /// Source IP address
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_ip: Option<IpAddr>,
+    /// User agent string
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub user_agent: Option<String>,
+    /// API key ID (if authenticated)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub api_key_id: Option<String>,
+    /// API key name (if authenticated)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub api_key_name: Option<String>,
+    /// Role name (if authenticated)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub role_name: Option<String>,
+}
+
+impl RequestContext {
+    /// Create a new request context with generated ID
+    pub fn new() -> Self {
+        Self {
+            request_id: Uuid::new_v4().to_string(),
+            timestamp: Utc::now(),
+            source_ip: None,
+            user_agent: None,
+            api_key_id: None,
+            api_key_name: None,
+            role_name: None,
+        }
+    }
+
+    /// Set authentication info from an auth result
+    pub fn with_auth(mut self, auth: &auth::AuthResult) -> Self {
+        self.api_key_id = Some(auth.api_key.id.clone());
+        self.api_key_name = Some(auth.api_key.name.clone());
+        self.role_name = Some(auth.role.name.clone());
+        self
+    }
+}
+
+impl Default for RequestContext {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Request to execute a plugin action
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExecuteRequest {
+    /// Credential alias or ID
+    pub credential: String,
+    /// Action to perform (e.g., "http.request", "crypto.sign")
+    pub action: String,
+    /// Action-specific parameters
+    pub params: serde_json::Value,
+}
+
+/// Response from executing a plugin action
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExecuteResponse {
+    /// HTTP status code (or equivalent)
+    pub status: u16,
+    /// Response headers
+    pub headers: HashMap<String, String>,
+    /// Response body
+    #[serde(with = "base64_bytes")]
+    pub body: Vec<u8>,
+}
+
+impl ExecuteResponse {
+    /// Create a success response
+    pub fn success(body: impl Into<Vec<u8>>) -> Self {
+        Self {
+            status: 200,
+            headers: HashMap::new(),
+            body: body.into(),
+        }
+    }
+
+    /// Create an error response
+    pub fn error(status: u16, message: impl Into<String>) -> Self {
+        Self {
+            status,
+            headers: HashMap::new(),
+            body: message.into().into_bytes(),
+        }
+    }
+}
+
+/// Helper module for base64 encoding of bytes in serde
+mod base64_bytes {
+    use base64::{engine::general_purpose::STANDARD, Engine};
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub fn serialize<S>(bytes: &[u8], serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(&STANDARD.encode(bytes))
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<Vec<u8>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let s = String::deserialize(deserializer)?;
+        STANDARD.decode(&s).map_err(serde::de::Error::custom)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_credential_creation() {
+        let cred = Credential::new(
+            "test-api".to_string(),
+            CredentialData::ApiKey {
+                key: Secret::new("secret-key"),
+                header_name: "Authorization".to_string(),
+                header_prefix: "Bearer ".to_string(),
+            },
+        );
+
+        assert_eq!(cred.alias, "test-api");
+        assert_eq!(cred.credential_type, CredentialType::ApiKey);
+        assert!(!cred.id.is_empty());
+    }
+
+    #[test]
+    fn test_credential_metadata() {
+        let cred = Credential::new(
+            "test".to_string(),
+            CredentialData::BasicAuth {
+                username: "user".to_string(),
+                password: Secret::new("pass"),
+            },
+        )
+        .with_metadata("description", "Test credential");
+
+        let meta = CredentialMetadata::from(&cred);
+        assert_eq!(meta.alias, "test");
+        assert_eq!(meta.metadata.get("description"), Some(&"Test credential".to_string()));
+    }
+
+    #[test]
+    fn test_secret_serialization() {
+        let cred = CredentialData::ApiKey {
+            key: Secret::new("my-secret-key"),
+            header_name: "Authorization".to_string(),
+            header_prefix: "Bearer ".to_string(),
+        };
+
+        let json = serde_json::to_string(&cred).unwrap();
+        assert!(json.contains("my-secret-key")); // Serialized for storage
+
+        let parsed: CredentialData = serde_json::from_str(&json).unwrap();
+        if let CredentialData::ApiKey { key, .. } = parsed {
+            assert_eq!(key.expose(), "my-secret-key");
+        } else {
+            panic!("Wrong variant");
+        }
+    }
+}

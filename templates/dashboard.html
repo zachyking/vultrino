@@ -1,0 +1,115 @@
+{% extends "layout.html" %}
+
+{% block title %}Dashboard - Vultrino{% endblock %}
+{% block nav_dashboard %}active{% endblock %}
+{% block page_title %}Dashboard{% endblock %}
+
+{% block flash_message %}
+{% if let Some(f) = flash %}
+<div class="flash {{ f.kind.as_class() }}">
+    {{ f.message }}
+</div>
+{% endif %}
+{% endblock %}
+
+{% block content %}
+<div class="stats-grid">
+    <div class="stat-card">
+        <div class="stat-icon credentials">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <rect x="3" y="11" width="18" height="11" rx="2" ry="2"></rect>
+                <path d="M7 11V7a5 5 0 0 1 10 0v4"></path>
+            </svg>
+        </div>
+        <div class="stat-content">
+            <div class="stat-value">{{ stats.total_credentials }}</div>
+            <div class="stat-label">Credentials</div>
+        </div>
+    </div>
+
+    <div class="stat-card">
+        <div class="stat-icon roles">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"></path>
+                <circle cx="9" cy="7" r="4"></circle>
+                <path d="M23 21v-2a4 4 0 0 0-3-3.87"></path>
+                <path d="M16 3.13a4 4 0 0 1 0 7.75"></path>
+            </svg>
+        </div>
+        <div class="stat-content">
+            <div class="stat-value">{{ stats.total_roles }}</div>
+            <div class="stat-label">Roles</div>
+        </div>
+    </div>
+
+    <div class="stat-card">
+        <div class="stat-icon keys">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <path d="M21 2l-2 2m-7.61 7.61a5.5 5.5 0 1 1-7.778 7.778 5.5 5.5 0 0 1 7.777-7.777zm0 0L15.5 7.5m0 0l3 3L22 7l-3-3m-3.5 3.5L19 4"></path>
+            </svg>
+        </div>
+        <div class="stat-content">
+            <div class="stat-value">{{ stats.total_api_keys }}</div>
+            <div class="stat-label">API Keys</div>
+        </div>
+    </div>
+
+    <div class="stat-card">
+        <div class="stat-icon requests">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <polyline points="22 12 18 12 15 21 9 3 6 12 2 12"></polyline>
+            </svg>
+        </div>
+        <div class="stat-content">
+            <div class="stat-value">{{ stats.recent_requests }}</div>
+            <div class="stat-label">Requests (24h)</div>
+        </div>
+    </div>
+</div>
+
+<div class="dashboard-sections">
+    <section class="dashboard-section">
+        <h2>Quick Actions</h2>
+        <div class="quick-actions">
+            <a href="/credentials/new" class="action-card">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <line x1="12" y1="5" x2="12" y2="19"></line>
+                    <line x1="5" y1="12" x2="19" y2="12"></line>
+                </svg>
+                <span>Add Credential</span>
+            </a>
+            <a href="/keys/new" class="action-card">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <path d="M21 2l-2 2m-7.61 7.61a5.5 5.5 0 1 1-7.778 7.778 5.5 5.5 0 0 1 7.777-7.777zm0 0L15.5 7.5m0 0l3 3L22 7l-3-3m-3.5 3.5L19 4"></path>
+                </svg>
+                <span>Create API Key</span>
+            </a>
+            <a href="/roles/new" class="action-card">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <path d="M16 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"></path>
+                    <circle cx="8.5" cy="7" r="4"></circle>
+                    <line x1="20" y1="8" x2="20" y2="14"></line>
+                    <line x1="23" y1="11" x2="17" y2="11"></line>
+                </svg>
+                <span>Create Role</span>
+            </a>
+        </div>
+    </section>
+
+    <section class="dashboard-section">
+        <h2>Getting Started</h2>
+        <div class="info-card">
+            <h3>Using Vultrino with AI Agents</h3>
+            <p>Vultrino acts as a secure credential proxy for AI agents. Here's how to get started:</p>
+            <ol>
+                <li>Add your API credentials (GitHub, OpenAI, etc.)</li>
+                <li>Create an API key with appropriate permissions</li>
+                <li>Configure your AI agent to use Vultrino's MCP server or HTTP API</li>
+            </ol>
+            <div class="code-block">
+                <code>vultrino serve --mcp</code>
+            </div>
+        </div>
+    </section>
+</div>
+{% endblock %}

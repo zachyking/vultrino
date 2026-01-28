@@ -1,0 +1,56 @@
+{% extends "layout.html" %}
+
+{% block title %}Audit Log - Vultrino{% endblock %}
+{% block nav_audit %}active{% endblock %}
+{% block page_title %}Audit Log{% endblock %}
+
+{% block flash_message %}
+{% if let Some(f) = flash %}
+<div class="flash {{ f.kind.as_class() }}">
+    {{ f.message }}
+</div>
+{% endif %}
+{% endblock %}
+
+{% block content %}
+{% if entries.is_empty() %}
+<div class="empty-state">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+        <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path>
+        <polyline points="14 2 14 8 20 8"></polyline>
+        <line x1="16" y1="13" x2="8" y2="13"></line>
+        <line x1="16" y1="17" x2="8" y2="17"></line>
+        <polyline points="10 9 9 9 8 9"></polyline>
+    </svg>
+    <h3>No audit entries yet</h3>
+    <p>Requests made through Vultrino will appear here.</p>
+</div>
+{% else %}
+<div class="table-container">
+    <table class="data-table">
+        <thead>
+            <tr>
+                <th>Timestamp</th>
+                <th>Action</th>
+                <th>Credential</th>
+                <th>API Key</th>
+                <th>Status</th>
+                <th>Details</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for entry in entries %}
+            <tr>
+                <td>{{ entry.timestamp }}</td>
+                <td>{{ entry.action }}</td>
+                <td>{{ entry.credential }}</td>
+                <td>{{ entry.api_key }}</td>
+                <td><span class="badge badge-{{ entry.status }}">{{ entry.status }}</span></td>
+                <td>{{ entry.details }}</td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
+{% endif %}
+{% endblock %}

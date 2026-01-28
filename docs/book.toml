@@ -1,0 +1,29 @@
+[book]
+title = "Vultrino Documentation"
+authors = ["Vultrino Contributors"]
+description = "A credential proxy for the AI era - enabling AI agents to use credentials without seeing them"
+language = "en"
+src = "src"
+
+[build]
+build-dir = "book"
+
+[output.html]
+default-theme = "light"
+preferred-dark-theme = "navy"
+git-repository-url = "https://github.com/vultrino/vultrino"
+edit-url-template = "https://github.com/vultrino/vultrino/edit/main/docs/{path}"
+site-url = "/vultrino/"
+cname = "docs.vultrino.dev"
+
+[output.html.fold]
+enable = true
+level = 1
+
+[output.html.playground]
+editable = false
+
+[output.html.search]
+enable = true
+limit-results = 30
+boost-hierarchy = 2

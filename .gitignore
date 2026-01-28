@@ -1,0 +1,38 @@
+# Build artifacts
+/target/
+**/*.rs.bk
+*.pdb
+
+# Cargo
+Cargo.lock
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Environment and secrets
+.env
+.env.*
+*.pem
+*.key
+credentials.enc
+
+# Claude Code
+.claude/
+
+# Documentation build
+/docs/book/
+
+# Test artifacts
+*.log
+/tmp/
+
+# Plugin build artifacts
+/plugins/*/target/
