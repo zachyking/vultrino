@@ -88,6 +88,7 @@ function copyKey() {
                 <td class="cell-actions">
                     <form action="/keys/{{ key.id }}/revoke" method="post" class="inline-form"
                           onsubmit="return confirm('Are you sure you want to revoke this API key?')">
+                        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
                         <button type="submit" class="btn-icon btn-danger" title="Revoke">
                             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                                 <circle cx="12" cy="12" r="10"></circle>

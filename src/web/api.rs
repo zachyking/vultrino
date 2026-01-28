@@ -30,13 +30,21 @@ fn extract_api_key(headers: &axum::http::HeaderMap) -> Option<String> {
         .map(|s| s.to_string())
 }
 
-/// Reload auth data from storage and validate the API key
-/// This ensures newly created/revoked keys are always reflected
-async fn reload_and_validate_key(state: &AppState, api_key: &str) -> Result<(ApiKey, Role), String> {
-    // Reload storage from disk to pick up any external changes
+/// Validate the API key using the cached AuthManager
+/// Auth data is refreshed when keys/roles are modified through the web UI
+async fn validate_api_key(state: &AppState, api_key: &str) -> Result<(ApiKey, Role), String> {
+    let auth_manager = state.auth_manager.read().await;
+    auth_manager
+        .validate_key(api_key)
+        .map_err(|e| e.to_string())
+}
+
+/// Refresh auth data from storage (called after key/role modifications)
+pub async fn refresh_auth_data(state: &AppState) -> Result<(), String> {
+    // Reload storage to get latest data
     state.storage.reload().await.map_err(|e| format!("Failed to reload storage: {}", e))?;
 
-    // Reload keys and roles from storage
+    // Get fresh keys and roles
     let stored_keys = state.storage.list_api_keys().await.unwrap_or_default();
     let stored_roles = state.storage.list_roles().await.unwrap_or_default();
 
@@ -44,10 +52,7 @@ async fn reload_and_validate_key(state: &AppState, api_key: &str) -> Result<(Api
     let mut auth_manager = state.auth_manager.write().await;
     *auth_manager = crate::auth::AuthManager::from_data(stored_roles, stored_keys);
 
-    // Now validate the key
-    auth_manager
-        .validate_key(api_key)
-        .map_err(|e| e.to_string())
+    Ok(())
 }
 
 /// API error response
@@ -117,7 +122,7 @@ pub async fn api_execute(
     };
 
     // Reload auth manager from storage to pick up any new keys
-    let (key, role) = match reload_and_validate_key(&state, &api_key).await {
+    let (key, role) = match validate_api_key(&state, &api_key).await {
         Ok((k, r)) => (k, r),
         Err(e) => {
             return error_response(StatusCode::UNAUTHORIZED, "invalid_api_key", e)
@@ -225,7 +230,7 @@ pub async fn api_list_credentials(
     };
 
     // Reload auth manager from storage to pick up any new keys
-    let (key, role) = match reload_and_validate_key(&state, &api_key).await {
+    let (key, role) = match validate_api_key(&state, &api_key).await {
         Ok((k, r)) => (k, r),
         Err(e) => {
             return error_response(StatusCode::UNAUTHORIZED, "invalid_api_key", e)

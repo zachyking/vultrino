@@ -2,19 +2,60 @@
 
 use askama::Template;
 use axum::{
-    extract::{Path, State},
+    extract::{ConnectInfo, Path, State},
+    http::HeaderMap,
     response::{Html, IntoResponse, Redirect, Response},
     Form,
 };
 use serde::Deserialize;
 use std::collections::HashMap;
+use std::net::{IpAddr, SocketAddr};
+use subtle::ConstantTimeEq;
 use tower_sessions::Session;
+
+/// Constant-time byte comparison to prevent timing attacks
+fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        // Still do a comparison to keep timing consistent
+        let _ = a.ct_eq(&vec![0u8; a.len()]);
+        return false;
+    }
+    a.ct_eq(b).into()
+}
+
+/// Extract client IP from request, considering X-Forwarded-For for reverse proxy setups
+fn get_client_ip(headers: &HeaderMap, socket_addr: &SocketAddr) -> IpAddr {
+    // Check X-Forwarded-For header first (for reverse proxy setups)
+    if let Some(forwarded) = headers.get("x-forwarded-for") {
+        if let Ok(forwarded_str) = forwarded.to_str() {
+            // Take the first IP in the chain (original client)
+            if let Some(first_ip) = forwarded_str.split(',').next() {
+                if let Ok(ip) = first_ip.trim().parse::<IpAddr>() {
+                    return ip;
+                }
+            }
+        }
+    }
+
+    // Check X-Real-IP header (nginx)
+    if let Some(real_ip) = headers.get("x-real-ip") {
+        if let Ok(ip_str) = real_ip.to_str() {
+            if let Ok(ip) = ip_str.trim().parse::<IpAddr>() {
+                return ip;
+            }
+        }
+    }
+
+    // Fall back to direct connection IP
+    socket_addr.ip()
+}
 
 use crate::auth::Permission;
 use crate::plugins::PluginInstaller;
 use crate::{Credential, CredentialData, Secret};
 
-use super::auth::{clear_session, set_authenticated_session, RequireAuth};
+use super::api::refresh_auth_data;
+use super::auth::{clear_session, get_or_create_csrf_token, regenerate_csrf_token, set_authenticated_session, validate_csrf_token, RequireAuth};
 use super::server::AppState;
 use super::templates::{
     AuditLogTemplate, ApiKeyDisplay, CredentialDisplay, CredentialNewTemplate,
@@ -38,18 +79,49 @@ pub struct LoginForm {
 
 pub async fn login_submit(
     State(state): State<AppState>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
     session: Session,
     Form(form): Form<LoginForm>,
 ) -> Response {
+    // Get client IP for rate limiting
+    let client_ip = get_client_ip(&headers, &addr);
+    let rate_limiter = &state.rate_limiter;
+
+    // Check rate limit before processing
+    if let Err(remaining_secs) = rate_limiter.check_rate_limit(&client_ip).await {
+        let minutes = remaining_secs / 60;
+        let error_msg = if minutes > 0 {
+            format!("Too many login attempts. Please try again in {} minute(s).", minutes + 1)
+        } else {
+            format!("Too many login attempts. Please try again in {} seconds.", remaining_secs)
+        };
+
+        let template = LoginTemplate {
+            error: Some(error_msg),
+        };
+        return Html(template.render().unwrap_or_else(|e| format!("Template error: {}", e))).into_response();
+    }
+
     let admin_auth = &state.admin_auth;
 
-    // Verify credentials
-    if form.username == admin_auth.username() && admin_auth.verify_password(&form.password) {
+    // Verify credentials using constant-time comparison to prevent timing attacks
+    // Always verify password regardless of username match to prevent username enumeration
+    let password_valid = admin_auth.verify_password(&form.password);
+    let username_valid = constant_time_eq(form.username.as_bytes(), admin_auth.username().as_bytes());
+
+    if username_valid && password_valid {
+        // Clear rate limit attempts on successful login
+        rate_limiter.clear_attempts(&client_ip).await;
+
         // Set session
         if set_authenticated_session(&session, &form.username).await.is_ok() {
             return Redirect::to("/dashboard").into_response();
         }
     }
+
+    // Record failed attempt for rate limiting
+    rate_limiter.record_failed_attempt(&client_ip).await;
 
     // Failed login
     let template = LoginTemplate {
@@ -96,28 +168,35 @@ pub async fn dashboard(
 
 pub async fn credentials_list(
     State(state): State<AppState>,
+    session: Session,
     auth: RequireAuth,
 ) -> impl IntoResponse {
     let credentials = state.storage.list().await.unwrap_or_default();
     let credential_displays: Vec<CredentialDisplay> = credentials.iter().map(|c| c.into()).collect();
 
+    let csrf_token = get_or_create_csrf_token(&session).await.unwrap_or_default();
+
     let template = CredentialsListTemplate {
         username: auth.session.username,
         credentials: credential_displays,
         flash: None,
+        csrf_token,
     };
 
     Html(template.render().unwrap_or_else(|e| format!("Template error: {}", e)))
 }
 
-pub async fn credential_new(auth: RequireAuth) -> impl IntoResponse {
+pub async fn credential_new(session: Session, auth: RequireAuth) -> impl IntoResponse {
     // Load plugin credential types
     let plugin_types = get_plugin_credential_types().await;
+
+    let csrf_token = get_or_create_csrf_token(&session).await.unwrap_or_default();
 
     let template = CredentialNewTemplate {
         username: auth.session.username,
         error: None,
         plugin_types,
+        csrf_token,
     };
 
     Html(template.render().unwrap_or_else(|e| format!("Template error: {}", e)))
@@ -158,20 +237,29 @@ pub struct CredentialForm {
     // Plugin credential fields (dynamic)
     #[serde(flatten)]
     plugin_fields: HashMap<String, String>,
+    // CSRF token
+    csrf_token: String,
 }
 
 pub async fn credential_create(
     State(state): State<AppState>,
+    session: Session,
     auth: RequireAuth,
     Form(form): Form<CredentialForm>,
 ) -> Response {
+    // Validate CSRF token
+    if !validate_csrf_token(&session, &form.csrf_token).await {
+        return render_credential_new_error_with_session(&session, auth, "Invalid security token. Please try again.")
+            .await
+            .into_response();
+    }
     // Build credential data based on type
     let data = match form.credential_type.as_str() {
         "api_key" => {
             let key = match form.api_key {
                 Some(k) if !k.is_empty() => k,
                 _ => {
-                    return render_credential_new_error(auth, "API key is required")
+                    return render_credential_new_error_with_session(&session, auth, "API key is required")
                         .await
                         .into_response();
                 }
@@ -186,7 +274,7 @@ pub async fn credential_create(
             let username = match form.username {
                 Some(u) if !u.is_empty() => u,
                 _ => {
-                    return render_credential_new_error(auth, "Username is required")
+                    return render_credential_new_error_with_session(&session, auth, "Username is required")
                         .await
                         .into_response();
                 }
@@ -194,7 +282,7 @@ pub async fn credential_create(
             let password = match form.password {
                 Some(p) if !p.is_empty() => p,
                 _ => {
-                    return render_credential_new_error(auth, "Password is required")
+                    return render_credential_new_error_with_session(&session, auth, "Password is required")
                         .await
                         .into_response();
                 }
@@ -209,12 +297,12 @@ pub async fn credential_create(
             match parse_plugin_credential(&form).await {
                 Ok(data) => data,
                 Err(e) => {
-                    return render_credential_new_error(auth, &e).await.into_response();
+                    return render_credential_new_error_with_session(&session, auth, &e).await.into_response();
                 }
             }
         }
         _ => {
-            return render_credential_new_error(auth, "Invalid credential type")
+            return render_credential_new_error_with_session(&session, auth, "Invalid credential type")
                 .await
                 .into_response();
         }
@@ -234,7 +322,7 @@ pub async fn credential_create(
     }
 
     if let Err(e) = state.storage.store(&credential).await {
-        return render_credential_new_error(auth, &format!("Failed to save: {}", e))
+        return render_credential_new_error_with_session(&session, auth, &format!("Failed to save: {}", e))
             .await
             .into_response();
     }
@@ -295,29 +383,45 @@ async fn parse_plugin_credential(form: &CredentialForm) -> Result<CredentialData
     Ok(CredentialData::Custom(data))
 }
 
-async fn render_credential_new_error(auth: RequireAuth, error: &str) -> impl IntoResponse {
+async fn render_credential_new_error_with_session(session: &Session, auth: RequireAuth, error: &str) -> impl IntoResponse {
     let plugin_types = get_plugin_credential_types().await;
+    let csrf_token = get_or_create_csrf_token(session).await.unwrap_or_default();
     let template = CredentialNewTemplate {
         username: auth.session.username,
         error: Some(error.to_string()),
         plugin_types,
+        csrf_token,
     };
     Html(template.render().unwrap_or_else(|e| format!("Template error: {}", e)))
 }
 
+#[derive(Deserialize)]
+pub struct DeleteForm {
+    csrf_token: String,
+}
+
 pub async fn credential_delete(
     State(state): State<AppState>,
+    session: Session,
     _auth: RequireAuth,
     Path(id): Path<String>,
+    Form(form): Form<DeleteForm>,
 ) -> impl IntoResponse {
+    // Validate CSRF token
+    if !validate_csrf_token(&session, &form.csrf_token).await {
+        return Redirect::to("/credentials").into_response();
+    }
     let _ = state.storage.delete(&id).await;
-    Redirect::to("/credentials")
+    // Regenerate CSRF token after successful action
+    let _ = regenerate_csrf_token(&session).await;
+    Redirect::to("/credentials").into_response()
 }
 
 // ============== Roles ==============
 
 pub async fn roles_list(
     State(state): State<AppState>,
+    session: Session,
     auth: RequireAuth,
 ) -> impl IntoResponse {
     let auth_manager = state.auth_manager.read().await;
@@ -333,20 +437,24 @@ pub async fn roles_list(
     }
 
     let role_displays: Vec<RoleDisplay> = roles.iter().map(|r| r.into()).collect();
+    let csrf_token = get_or_create_csrf_token(&session).await.unwrap_or_default();
 
     let template = RolesListTemplate {
         username: auth.session.username,
         roles: role_displays,
         flash: None,
+        csrf_token,
     };
 
     Html(template.render().unwrap_or_else(|e| format!("Template error: {}", e)))
 }
 
-pub async fn role_new(auth: RequireAuth) -> impl IntoResponse {
+pub async fn role_new(session: Session, auth: RequireAuth) -> impl IntoResponse {
+    let csrf_token = get_or_create_csrf_token(&session).await.unwrap_or_default();
     let template = RoleNewTemplate {
         username: auth.session.username,
         error: None,
+        csrf_token,
     };
 
     Html(template.render().unwrap_or_else(|e| format!("Template error: {}", e)))
@@ -358,13 +466,20 @@ pub struct RoleForm {
     description: Option<String>,
     permissions: Vec<String>,
     scopes: Option<String>,
+    csrf_token: String,
 }
 
 pub async fn role_create(
     State(state): State<AppState>,
+    session: Session,
     auth: RequireAuth,
     Form(form): Form<RoleForm>,
 ) -> Response {
+    // Validate CSRF token
+    if !validate_csrf_token(&session, &form.csrf_token).await {
+        return render_role_new_error_with_session(&session, auth, "Invalid security token. Please try again.").await.into_response();
+    }
+
     // Parse permissions
     let permissions: std::collections::HashSet<Permission> = form
         .permissions
@@ -380,7 +495,7 @@ pub async fn role_create(
         .collect();
 
     if permissions.is_empty() {
-        return render_role_new_error(auth, "At least one permission is required").into_response();
+        return render_role_new_error_with_session(&session, auth, "At least one permission is required").await.into_response();
     }
 
     // Parse scopes
@@ -394,48 +509,66 @@ pub async fn role_create(
     let role = match auth_manager.create_role(&form.name, permissions, credential_scopes, form.description) {
         Ok(r) => r,
         Err(e) => {
-            return render_role_new_error(auth, &format!("Failed to create role: {}", e)).into_response();
+            return render_role_new_error_with_session(&session, auth, &format!("Failed to create role: {}", e)).await.into_response();
         }
     };
 
     // Store the role
     if let Err(e) = state.storage.store_role(&role).await {
-        return render_role_new_error(auth, &format!("Failed to save: {}", e)).into_response();
+        return render_role_new_error_with_session(&session, auth, &format!("Failed to save: {}", e)).await.into_response();
     }
+
+    // Refresh auth data to update the cached AuthManager
+    let _ = refresh_auth_data(&state).await;
 
     Redirect::to("/roles").into_response()
 }
 
-fn render_role_new_error(auth: RequireAuth, error: &str) -> impl IntoResponse {
+async fn render_role_new_error_with_session(session: &Session, auth: RequireAuth, error: &str) -> impl IntoResponse {
+    let csrf_token = get_or_create_csrf_token(session).await.unwrap_or_default();
     let template = RoleNewTemplate {
         username: auth.session.username,
         error: Some(error.to_string()),
+        csrf_token,
     };
     Html(template.render().unwrap_or_else(|e| format!("Template error: {}", e)))
 }
 
 pub async fn role_delete(
     State(state): State<AppState>,
+    session: Session,
     _auth: RequireAuth,
     Path(id): Path<String>,
+    Form(form): Form<DeleteForm>,
 ) -> impl IntoResponse {
+    // Validate CSRF token
+    if !validate_csrf_token(&session, &form.csrf_token).await {
+        return Redirect::to("/roles").into_response();
+    }
+
     // Don't allow deleting built-in roles
     let auth_manager = state.auth_manager.read().await;
     if let Some(role) = auth_manager.get_role(&id) {
         if matches!(role.name.as_str(), "admin" | "read-only" | "executor") {
-            return Redirect::to("/roles");
+            return Redirect::to("/roles").into_response();
         }
     }
     drop(auth_manager);
 
     let _ = state.storage.delete_role(&id).await;
-    Redirect::to("/roles")
+
+    // Refresh auth data to update the cached AuthManager
+    let _ = refresh_auth_data(&state).await;
+
+    let _ = regenerate_csrf_token(&session).await;
+    Redirect::to("/roles").into_response()
 }
 
 // ============== API Keys ==============
 
 pub async fn keys_list(
     State(state): State<AppState>,
+    session: Session,
     auth: RequireAuth,
 ) -> impl IntoResponse {
     let keys = state.storage.list_api_keys().await.unwrap_or_default();
@@ -449,11 +582,14 @@ pub async fn keys_list(
         })
         .collect();
 
+    let csrf_token = get_or_create_csrf_token(&session).await.unwrap_or_default();
+
     let template = KeysListTemplate {
         username: auth.session.username,
         keys: key_displays,
         flash: None,
         new_key: None,
+        csrf_token,
     };
 
     Html(template.render().unwrap_or_else(|e| format!("Template error: {}", e)))
@@ -461,6 +597,7 @@ pub async fn keys_list(
 
 pub async fn key_new(
     State(state): State<AppState>,
+    session: Session,
     auth: RequireAuth,
 ) -> impl IntoResponse {
     let auth_manager = state.auth_manager.read().await;
@@ -476,11 +613,13 @@ pub async fn key_new(
     }
 
     let role_options: Vec<RoleOption> = roles.iter().map(|r| r.into()).collect();
+    let csrf_token = get_or_create_csrf_token(&session).await.unwrap_or_default();
 
     let template = KeyNewTemplate {
         username: auth.session.username,
         roles: role_options,
         error: None,
+        csrf_token,
     };
 
     Html(template.render().unwrap_or_else(|e| format!("Template error: {}", e)))
@@ -491,13 +630,19 @@ pub struct KeyForm {
     name: String,
     role: String,
     expires: Option<String>,
+    csrf_token: String,
 }
 
 pub async fn key_create(
     State(state): State<AppState>,
+    session: Session,
     auth: RequireAuth,
     Form(form): Form<KeyForm>,
 ) -> Response {
+    // Validate CSRF token
+    if !validate_csrf_token(&session, &form.csrf_token).await {
+        return render_key_new_error_with_session(&state, &session, auth, "Invalid security token. Please try again.").await.into_response();
+    }
     // Parse expiration
     let expires_in = match form.expires.as_deref() {
         Some("never") | Some("") | None => None,
@@ -505,7 +650,7 @@ pub async fn key_create(
             match parse_duration(s) {
                 Ok(d) => d,
                 Err(e) => {
-                    return render_key_new_error(state.clone(), auth, &e).await.into_response();
+                    return render_key_new_error_with_session(&state, &session, auth, &e).await.into_response();
                 }
             }
         }
@@ -515,7 +660,7 @@ pub async fn key_create(
 
     // Verify role exists
     if auth_manager.get_role_by_name(&form.role).is_none() {
-        return render_key_new_error(state.clone(), auth, &format!("Role '{}' not found", form.role))
+        return render_key_new_error_with_session(&state, &session, auth, &format!("Role '{}' not found", form.role))
             .await
             .into_response();
     }
@@ -524,7 +669,7 @@ pub async fn key_create(
     let (full_key, api_key) = match auth_manager.create_api_key(&form.name, &form.role, expires_in) {
         Ok(k) => k,
         Err(e) => {
-            return render_key_new_error(state.clone(), auth, &format!("Failed to create key: {}", e))
+            return render_key_new_error_with_session(&state, &session, auth, &format!("Failed to create key: {}", e))
                 .await
                 .into_response();
         }
@@ -532,10 +677,16 @@ pub async fn key_create(
 
     // Store the key
     if let Err(e) = state.storage.store_api_key(&api_key).await {
-        return render_key_new_error(state.clone(), auth, &format!("Failed to save: {}", e))
+        return render_key_new_error_with_session(&state, &session, auth, &format!("Failed to save: {}", e))
             .await
             .into_response();
     }
+
+    // Refresh auth data to update the cached AuthManager
+    let _ = refresh_auth_data(&state).await;
+
+    // Need to re-acquire the read lock after refresh
+    let auth_manager = state.auth_manager.read().await;
 
     // Show the key list with the new key displayed once
     let keys = state.storage.list_api_keys().await.unwrap_or_default();
@@ -547,6 +698,8 @@ pub async fn key_create(
         })
         .collect();
 
+    let csrf_token = get_or_create_csrf_token(&session).await.unwrap_or_default();
+
     let template = KeysListTemplate {
         username: auth.session.username,
         keys: key_displays,
@@ -555,12 +708,13 @@ pub async fn key_create(
             message: "API key created successfully".to_string(),
         }),
         new_key: Some(full_key),
+        csrf_token,
     };
 
     Html(template.render().unwrap_or_else(|e| format!("Template error: {}", e))).into_response()
 }
 
-async fn render_key_new_error(state: AppState, auth: RequireAuth, error: &str) -> impl IntoResponse {
+async fn render_key_new_error_with_session(state: &AppState, session: &Session, auth: RequireAuth, error: &str) -> impl IntoResponse {
     let auth_manager = state.auth_manager.read().await;
     let mut roles = auth_manager.list_roles();
 
@@ -573,22 +727,35 @@ async fn render_key_new_error(state: AppState, auth: RequireAuth, error: &str) -
     }
 
     let role_options: Vec<RoleOption> = roles.iter().map(|r| r.into()).collect();
+    let csrf_token = get_or_create_csrf_token(session).await.unwrap_or_default();
 
     let template = KeyNewTemplate {
         username: auth.session.username,
         roles: role_options,
         error: Some(error.to_string()),
+        csrf_token,
     };
     Html(template.render().unwrap_or_else(|e| format!("Template error: {}", e)))
 }
 
 pub async fn key_revoke(
     State(state): State<AppState>,
+    session: Session,
     _auth: RequireAuth,
     Path(id): Path<String>,
+    Form(form): Form<DeleteForm>,
 ) -> impl IntoResponse {
+    // Validate CSRF token
+    if !validate_csrf_token(&session, &form.csrf_token).await {
+        return Redirect::to("/keys").into_response();
+    }
     let _ = state.storage.delete_api_key(&id).await;
-    Redirect::to("/keys")
+
+    // Refresh auth data to update the cached AuthManager
+    let _ = refresh_auth_data(&state).await;
+
+    let _ = regenerate_csrf_token(&session).await;
+    Redirect::to("/keys").into_response()
 }
 
 // ============== Audit Log ==============
@@ -658,4 +825,50 @@ fn parse_duration(s: &str) -> Result<Option<chrono::Duration>, String> {
     };
 
     Ok(Some(duration))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_constant_time_eq_same() {
+        assert!(constant_time_eq(b"password123", b"password123"));
+        assert!(constant_time_eq(b"", b""));
+        assert!(constant_time_eq(b"a", b"a"));
+    }
+
+    #[test]
+    fn test_constant_time_eq_different() {
+        assert!(!constant_time_eq(b"password123", b"password124"));
+        assert!(!constant_time_eq(b"password123", b"password12"));
+        assert!(!constant_time_eq(b"a", b"b"));
+        assert!(!constant_time_eq(b"", b"a"));
+    }
+
+    #[test]
+    fn test_constant_time_eq_different_lengths() {
+        assert!(!constant_time_eq(b"short", b"longer"));
+        assert!(!constant_time_eq(b"admin", b"administrator"));
+    }
+
+    #[test]
+    fn test_parse_duration_valid() {
+        assert!(parse_duration("30d").unwrap().is_some());
+        assert!(parse_duration("24h").unwrap().is_some());
+        assert!(parse_duration("1w").unwrap().is_some());
+        assert!(parse_duration("6m").unwrap().is_some());
+        assert!(parse_duration("1y").unwrap().is_some());
+    }
+
+    #[test]
+    fn test_parse_duration_empty() {
+        assert!(parse_duration("").unwrap().is_none());
+    }
+
+    #[test]
+    fn test_parse_duration_invalid() {
+        assert!(parse_duration("invalid").is_err());
+        assert!(parse_duration("30x").is_err());
+    }
 }

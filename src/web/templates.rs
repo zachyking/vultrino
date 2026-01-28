@@ -85,6 +85,8 @@ pub struct CredentialsListTemplate {
     pub username: String,
     pub credentials: Vec<CredentialDisplay>,
     pub flash: Option<FlashMessage>,
+    /// CSRF token for delete forms
+    pub csrf_token: String,
 }
 
 /// Plugin credential type display for template
@@ -150,6 +152,8 @@ pub struct CredentialNewTemplate {
     pub error: Option<String>,
     /// Plugin credential types available
     pub plugin_types: Vec<PluginCredentialType>,
+    /// CSRF token for form protection
+    pub csrf_token: String,
 }
 
 // ============== Roles ==============
@@ -190,6 +194,8 @@ pub struct RolesListTemplate {
     pub username: String,
     pub roles: Vec<RoleDisplay>,
     pub flash: Option<FlashMessage>,
+    /// CSRF token for delete forms
+    pub csrf_token: String,
 }
 
 #[derive(Template)]
@@ -197,6 +203,8 @@ pub struct RolesListTemplate {
 pub struct RoleNewTemplate {
     pub username: String,
     pub error: Option<String>,
+    /// CSRF token for form protection
+    pub csrf_token: String,
 }
 
 // ============== API Keys ==============
@@ -240,6 +248,8 @@ pub struct KeysListTemplate {
     pub flash: Option<FlashMessage>,
     /// New key that was just created (shown once)
     pub new_key: Option<String>,
+    /// CSRF token for delete forms
+    pub csrf_token: String,
 }
 
 /// Simplified role for key creation form
@@ -264,6 +274,8 @@ pub struct KeyNewTemplate {
     pub username: String,
     pub roles: Vec<RoleOption>,
     pub error: Option<String>,
+    /// CSRF token for form protection
+    pub csrf_token: String,
 }
 
 // ============== Audit Log ==============

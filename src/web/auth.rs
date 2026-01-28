@@ -5,13 +5,154 @@ use axum::{
     http::{request::Parts, StatusCode},
     response::{IntoResponse, Redirect, Response},
 };
+use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 use bcrypt::{hash, verify, DEFAULT_COST};
+use rand::RngCore;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+use std::net::IpAddr;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
+use subtle::ConstantTimeEq;
+use tokio::sync::RwLock;
 use tower_sessions::Session;
 
 /// Session key for storing authentication state
 const SESSION_KEY: &str = "vultrino_admin";
+/// Session key for storing CSRF token
+const CSRF_KEY: &str = "vultrino_csrf";
+/// Maximum login attempts before rate limiting kicks in
+const MAX_LOGIN_ATTEMPTS: u32 = 5;
+/// Window duration for rate limiting (in seconds)
+const RATE_LIMIT_WINDOW_SECS: u64 = 300; // 5 minutes
+/// Lockout duration after too many failed attempts (in seconds)
+const LOCKOUT_DURATION_SECS: u64 = 900; // 15 minutes
+
+/// Rate limiter for login attempts
+///
+/// Tracks login attempts by IP address and blocks IPs that exceed
+/// the maximum number of attempts within the rate limit window.
+#[derive(Debug, Clone)]
+pub struct LoginRateLimiter {
+    attempts: Arc<RwLock<HashMap<IpAddr, Vec<Instant>>>>,
+    lockouts: Arc<RwLock<HashMap<IpAddr, Instant>>>,
+}
+
+impl LoginRateLimiter {
+    /// Create a new rate limiter
+    pub fn new() -> Self {
+        Self {
+            attempts: Arc::new(RwLock::new(HashMap::new())),
+            lockouts: Arc::new(RwLock::new(HashMap::new())),
+        }
+    }
+
+    /// Check if an IP is currently locked out
+    pub async fn is_locked_out(&self, ip: &IpAddr) -> bool {
+        let lockouts = self.lockouts.read().await;
+        if let Some(lockout_start) = lockouts.get(ip) {
+            let lockout_duration = Duration::from_secs(LOCKOUT_DURATION_SECS);
+            if lockout_start.elapsed() < lockout_duration {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Check if a login attempt is allowed (not rate limited)
+    /// Returns Ok(()) if allowed, Err with remaining seconds if blocked
+    pub async fn check_rate_limit(&self, ip: &IpAddr) -> Result<(), u64> {
+        // Check for lockout first
+        let lockouts = self.lockouts.read().await;
+        if let Some(lockout_start) = lockouts.get(ip) {
+            let lockout_duration = Duration::from_secs(LOCKOUT_DURATION_SECS);
+            let elapsed = lockout_start.elapsed();
+            if elapsed < lockout_duration {
+                let remaining = lockout_duration - elapsed;
+                return Err(remaining.as_secs());
+            }
+        }
+        drop(lockouts);
+
+        // Check attempt count in current window
+        let mut attempts = self.attempts.write().await;
+        let now = Instant::now();
+        let window = Duration::from_secs(RATE_LIMIT_WINDOW_SECS);
+
+        if let Some(ip_attempts) = attempts.get_mut(ip) {
+            // Remove old attempts outside the window
+            ip_attempts.retain(|t| now.duration_since(*t) < window);
+
+            if ip_attempts.len() >= MAX_LOGIN_ATTEMPTS as usize {
+                // Calculate remaining time in window
+                if let Some(oldest) = ip_attempts.first() {
+                    let remaining = window.saturating_sub(now.duration_since(*oldest));
+                    return Err(remaining.as_secs());
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Record a failed login attempt
+    pub async fn record_failed_attempt(&self, ip: &IpAddr) {
+        let mut attempts = self.attempts.write().await;
+        let now = Instant::now();
+        let window = Duration::from_secs(RATE_LIMIT_WINDOW_SECS);
+
+        let ip_attempts = attempts.entry(*ip).or_insert_with(Vec::new);
+
+        // Clean up old attempts
+        ip_attempts.retain(|t| now.duration_since(*t) < window);
+
+        // Add new attempt
+        ip_attempts.push(now);
+
+        // Check if we need to lock out this IP
+        if ip_attempts.len() >= MAX_LOGIN_ATTEMPTS as usize {
+            drop(attempts);
+            let mut lockouts = self.lockouts.write().await;
+            lockouts.insert(*ip, now);
+        }
+    }
+
+    /// Clear attempts for an IP after successful login
+    pub async fn clear_attempts(&self, ip: &IpAddr) {
+        let mut attempts = self.attempts.write().await;
+        attempts.remove(ip);
+
+        let mut lockouts = self.lockouts.write().await;
+        lockouts.remove(ip);
+    }
+
+    /// Clean up old entries (call periodically to prevent memory leaks)
+    pub async fn cleanup(&self) {
+        let now = Instant::now();
+        let window = Duration::from_secs(RATE_LIMIT_WINDOW_SECS);
+        let lockout_duration = Duration::from_secs(LOCKOUT_DURATION_SECS);
+
+        // Clean up old attempts
+        let mut attempts = self.attempts.write().await;
+        attempts.retain(|_, timestamps| {
+            timestamps.retain(|t| now.duration_since(*t) < window);
+            !timestamps.is_empty()
+        });
+        drop(attempts);
+
+        // Clean up old lockouts
+        let mut lockouts = self.lockouts.write().await;
+        lockouts.retain(|_, lockout_start| {
+            lockout_start.elapsed() < lockout_duration
+        });
+    }
+}
+
+impl Default for LoginRateLimiter {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 /// Admin authentication manager
 #[derive(Debug, Clone)]
@@ -156,6 +297,53 @@ pub async fn clear_session(session: &Session) -> Result<(), StatusCode> {
     Ok(())
 }
 
+/// Generate a new CSRF token and store it in the session
+pub async fn generate_csrf_token(session: &Session) -> Result<String, StatusCode> {
+    let mut bytes = [0u8; 32];
+    rand::rngs::OsRng.fill_bytes(&mut bytes);
+    let token = URL_SAFE_NO_PAD.encode(bytes);
+
+    session
+        .insert(CSRF_KEY, token.clone())
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    Ok(token)
+}
+
+/// Get the current CSRF token from the session, generating one if needed
+pub async fn get_or_create_csrf_token(session: &Session) -> Result<String, StatusCode> {
+    if let Ok(Some(token)) = session.get::<String>(CSRF_KEY).await {
+        return Ok(token);
+    }
+    generate_csrf_token(session).await
+}
+
+/// Validate a CSRF token against the session using constant-time comparison
+pub async fn validate_csrf_token(session: &Session, token: &str) -> bool {
+    let stored: Option<String> = session.get(CSRF_KEY).await.ok().flatten();
+
+    match stored {
+        Some(stored_token) => {
+            let stored_bytes = stored_token.as_bytes();
+            let provided_bytes = token.as_bytes();
+
+            // Use constant-time comparison
+            if stored_bytes.len() != provided_bytes.len() {
+                return false;
+            }
+            stored_bytes.ct_eq(provided_bytes).into()
+        }
+        None => false,
+    }
+}
+
+/// Regenerate the CSRF token after a successful form submission
+/// This prevents token reuse attacks
+pub async fn regenerate_csrf_token(session: &Session) -> Result<String, StatusCode> {
+    generate_csrf_token(session).await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -179,5 +367,80 @@ mod tests {
             authenticated_at: chrono::Utc::now().timestamp() - (25 * 60 * 60), // 25 hours ago
         };
         assert!(!expired.is_valid());
+    }
+
+    #[test]
+    fn test_csrf_token_generation() {
+        // Test that generated tokens are the correct length and format
+        let mut bytes = [0u8; 32];
+        rand::rngs::OsRng.fill_bytes(&mut bytes);
+        let token = URL_SAFE_NO_PAD.encode(bytes);
+
+        // Base64 URL-safe encoding of 32 bytes = 43 characters
+        assert_eq!(token.len(), 43);
+        // Should only contain URL-safe characters
+        assert!(token.chars().all(|c| c.is_alphanumeric() || c == '-' || c == '_'));
+    }
+
+    #[tokio::test]
+    async fn test_rate_limiter_allows_initial_attempts() {
+        let limiter = LoginRateLimiter::new();
+        let ip: IpAddr = "192.168.1.1".parse().unwrap();
+
+        // First few attempts should be allowed
+        for _ in 0..MAX_LOGIN_ATTEMPTS {
+            assert!(limiter.check_rate_limit(&ip).await.is_ok());
+            limiter.record_failed_attempt(&ip).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn test_rate_limiter_blocks_after_max_attempts() {
+        let limiter = LoginRateLimiter::new();
+        let ip: IpAddr = "192.168.1.2".parse().unwrap();
+
+        // Record max failed attempts
+        for _ in 0..MAX_LOGIN_ATTEMPTS {
+            limiter.record_failed_attempt(&ip).await;
+        }
+
+        // Next check should be blocked
+        let result = limiter.check_rate_limit(&ip).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_rate_limiter_clear_on_success() {
+        let limiter = LoginRateLimiter::new();
+        let ip: IpAddr = "192.168.1.3".parse().unwrap();
+
+        // Record some failed attempts
+        for _ in 0..3 {
+            limiter.record_failed_attempt(&ip).await;
+        }
+
+        // Clear attempts (simulating successful login)
+        limiter.clear_attempts(&ip).await;
+
+        // Should be allowed again
+        assert!(limiter.check_rate_limit(&ip).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_rate_limiter_isolates_ips() {
+        let limiter = LoginRateLimiter::new();
+        let ip1: IpAddr = "192.168.1.10".parse().unwrap();
+        let ip2: IpAddr = "192.168.1.11".parse().unwrap();
+
+        // Block ip1
+        for _ in 0..MAX_LOGIN_ATTEMPTS {
+            limiter.record_failed_attempt(&ip1).await;
+        }
+
+        // ip1 should be blocked
+        assert!(limiter.check_rate_limit(&ip1).await.is_err());
+
+        // ip2 should still be allowed
+        assert!(limiter.check_rate_limit(&ip2).await.is_ok());
     }
 }
