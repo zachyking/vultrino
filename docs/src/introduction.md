@@ -4,23 +4,23 @@
 
 ## What is Vultrino?
 
-Vultrino is a secure credential proxy that allows AI agents, LLMs, and automated systems to make authenticated API requests without ever exposing the actual credentials. Instead of giving your AI agent direct access to API keys, you give it access to Vultrino, which injects the authentication on behalf of the agent.
+Vultrino is a secure credential proxy that allows AI agents, LLMs, and automated systems to use credentials without ever exposing them. Instead of giving your AI agent direct access to secrets, you give it access to Vultrino, which performs authenticated actions on behalf of the agent — whether that's making API calls, signing data with PGP keys, or any other credential-based operation.
 
 ```
 ┌─────────────────┐     ┌─────────────────┐     ┌─────────────────┐
-│   AI Agent      │────▶│    Vultrino     │────▶│   External API  │
-│   (Claude, etc) │     │   (injects auth)│     │   (GitHub, etc) │
+│   AI Agent      │────▶│    Vultrino     │────▶│  External API   │
+│   (Claude, etc) │     │ (uses secrets)  │     │  or Operation   │
 └─────────────────┘     └─────────────────┘     └─────────────────┘
         │                       │
-        │ "Use github-api       │ Authorization: Bearer ghp_xxx...
-        │  credential"          │
+        │ "Use my-credential"   │ Injects auth, signs data, etc.
+        │                       │
         ▼                       ▼
-   Never sees the key     Handles authentication
+   Never sees secrets    Performs secure actions
 ```
 
 ## Key Features
 
-- **Credential Isolation** — AI agents never see actual API keys or secrets
+- **Credential Isolation** — AI agents never see actual secrets or private keys
 - **Role-Based Access Control** — Fine-grained permissions for different applications
 - **Multiple Credential Types** — API keys, Basic Auth, PGP keys, and more
 - **Plugin System** — Extend with custom credential types and actions via WASM plugins
@@ -60,7 +60,7 @@ vultrino serve --mcp
 |-----------|-------------|
 | **CLI** | Command-line interface for all operations |
 | **Web UI** | Browser-based admin dashboard |
-| **HTTP Proxy** | Transparent proxy that injects credentials |
+| **HTTP Proxy** | Makes authenticated requests on behalf of agents |
 | **MCP Server** | Model Context Protocol server for LLM integration |
 
 ## Next Steps
