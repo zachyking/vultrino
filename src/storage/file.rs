@@ -38,6 +38,42 @@ struct StorageCache {
     /// API keys by ID
     #[serde(default)]
     api_keys: HashMap<String, ApiKey>,
+
+    // Secondary indexes for O(1) lookups (not serialized, rebuilt on load)
+    /// Index: credential alias -> credential ID
+    #[serde(skip)]
+    alias_index: HashMap<String, String>,
+    /// Index: role name -> role ID
+    #[serde(skip)]
+    role_name_index: HashMap<String, String>,
+    /// Index: API key hash -> API key ID
+    #[serde(skip)]
+    api_key_hash_index: HashMap<String, String>,
+}
+
+impl StorageCache {
+    /// Rebuild all secondary indexes from primary data
+    fn rebuild_indexes(&mut self) {
+        // Clear existing indexes
+        self.alias_index.clear();
+        self.role_name_index.clear();
+        self.api_key_hash_index.clear();
+
+        // Rebuild credential alias index
+        for (id, cred) in &self.credentials {
+            self.alias_index.insert(cred.alias.clone(), id.clone());
+        }
+
+        // Rebuild role name index
+        for (id, role) in &self.roles {
+            self.role_name_index.insert(role.name.clone(), id.clone());
+        }
+
+        // Rebuild API key hash index
+        for (id, key) in &self.api_keys {
+            self.api_key_hash_index.insert(key.key_hash.clone(), id.clone());
+        }
+    }
 }
 
 /// On-disk format for the storage file
@@ -110,7 +146,7 @@ impl FileStorage {
         let decrypted = decrypt(&storage_file.data, &master_key)?;
 
         // Try to parse as new format (StorageCache), fall back to old format (just credentials)
-        let cache: StorageCache = serde_json::from_slice(&decrypted)
+        let mut cache: StorageCache = serde_json::from_slice(&decrypted)
             .or_else(|_| {
                 // Try old format: just a HashMap of credentials
                 let credentials: HashMap<String, Credential> = serde_json::from_slice(&decrypted)
@@ -119,8 +155,14 @@ impl FileStorage {
                     credentials,
                     roles: HashMap::new(),
                     api_keys: HashMap::new(),
+                    alias_index: HashMap::new(),
+                    role_name_index: HashMap::new(),
+                    api_key_hash_index: HashMap::new(),
                 })
             })?;
+
+        // Rebuild secondary indexes from loaded data
+        cache.rebuild_indexes();
 
         Ok(Self {
             path,
@@ -140,7 +182,7 @@ impl FileStorage {
         let decrypted = decrypt(&storage_file.data, &self.master_key)?;
 
         // Parse as StorageCache
-        let cache: StorageCache = serde_json::from_slice(&decrypted)
+        let mut cache: StorageCache = serde_json::from_slice(&decrypted)
             .or_else(|_| {
                 // Try old format: just a HashMap of credentials
                 let credentials: HashMap<String, Credential> = serde_json::from_slice(&decrypted)
@@ -149,8 +191,14 @@ impl FileStorage {
                     credentials,
                     roles: HashMap::new(),
                     api_keys: HashMap::new(),
+                    alias_index: HashMap::new(),
+                    role_name_index: HashMap::new(),
+                    api_key_hash_index: HashMap::new(),
                 })
             })?;
+
+        // Rebuild secondary indexes from loaded data
+        cache.rebuild_indexes();
 
         // Update cache
         *self.cache.write() = cache;
@@ -196,13 +244,15 @@ impl StorageBackend for FileStorage {
         {
             let mut cache = self.cache.write();
 
-            // Check for duplicate alias
-            for existing in cache.credentials.values() {
-                if existing.alias == credential.alias && existing.id != credential.id {
+            // Check for duplicate alias using index (O(1) lookup)
+            if let Some(existing_id) = cache.alias_index.get(&credential.alias) {
+                if existing_id != &credential.id {
                     return Err(StorageError::AlreadyExists(credential.alias.clone()));
                 }
             }
 
+            // Update index
+            cache.alias_index.insert(credential.alias.clone(), credential.id.clone());
             cache.credentials.insert(credential.id.clone(), credential.clone());
         }
 
@@ -216,7 +266,12 @@ impl StorageBackend for FileStorage {
 
     async fn get_by_alias(&self, alias: &str) -> Result<Option<Credential>, StorageError> {
         let cache = self.cache.read();
-        Ok(cache.credentials.values().find(|c| c.alias == alias).cloned())
+        // O(1) lookup using index
+        if let Some(id) = cache.alias_index.get(alias) {
+            Ok(cache.credentials.get(id).cloned())
+        } else {
+            Ok(None)
+        }
     }
 
     async fn list(&self) -> Result<Vec<CredentialMetadata>, StorageError> {
@@ -227,7 +282,10 @@ impl StorageBackend for FileStorage {
     async fn delete(&self, id: &str) -> Result<(), StorageError> {
         {
             let mut cache = self.cache.write();
-            if cache.credentials.remove(id).is_none() {
+            if let Some(cred) = cache.credentials.remove(id) {
+                // Remove from alias index
+                cache.alias_index.remove(&cred.alias);
+            } else {
                 return Err(StorageError::NotFound(id.to_string()));
             }
         }
@@ -238,15 +296,21 @@ impl StorageBackend for FileStorage {
     async fn update(&self, credential: &Credential) -> Result<(), StorageError> {
         {
             let mut cache = self.cache.write();
-            if !cache.credentials.contains_key(&credential.id) {
-                return Err(StorageError::NotFound(credential.id.clone()));
-            }
+            let old_cred = cache.credentials.get(&credential.id)
+                .ok_or_else(|| StorageError::NotFound(credential.id.clone()))?
+                .clone();
 
-            // Check for duplicate alias (excluding this credential)
-            for existing in cache.credentials.values() {
-                if existing.alias == credential.alias && existing.id != credential.id {
+            // Check for duplicate alias using index (O(1) lookup)
+            if let Some(existing_id) = cache.alias_index.get(&credential.alias) {
+                if existing_id != &credential.id {
                     return Err(StorageError::AlreadyExists(credential.alias.clone()));
                 }
+            }
+
+            // Update alias index if alias changed
+            if old_cred.alias != credential.alias {
+                cache.alias_index.remove(&old_cred.alias);
+                cache.alias_index.insert(credential.alias.clone(), credential.id.clone());
             }
 
             cache.credentials.insert(credential.id.clone(), credential.clone());
@@ -275,13 +339,15 @@ impl StorageBackend for FileStorage {
         {
             let mut cache = self.cache.write();
 
-            // Check for duplicate name
-            for existing in cache.roles.values() {
-                if existing.name == role.name && existing.id != role.id {
+            // Check for duplicate name using index (O(1) lookup)
+            if let Some(existing_id) = cache.role_name_index.get(&role.name) {
+                if existing_id != &role.id {
                     return Err(StorageError::RoleAlreadyExists(role.name.clone()));
                 }
             }
 
+            // Update index
+            cache.role_name_index.insert(role.name.clone(), role.id.clone());
             cache.roles.insert(role.id.clone(), role.clone());
         }
 
@@ -295,7 +361,12 @@ impl StorageBackend for FileStorage {
 
     async fn get_role_by_name(&self, name: &str) -> Result<Option<Role>, StorageError> {
         let cache = self.cache.read();
-        Ok(cache.roles.values().find(|r| r.name == name).cloned())
+        // O(1) lookup using index
+        if let Some(id) = cache.role_name_index.get(name) {
+            Ok(cache.roles.get(id).cloned())
+        } else {
+            Ok(None)
+        }
     }
 
     async fn list_roles(&self) -> Result<Vec<Role>, StorageError> {
@@ -306,7 +377,10 @@ impl StorageBackend for FileStorage {
     async fn delete_role(&self, id: &str) -> Result<(), StorageError> {
         {
             let mut cache = self.cache.write();
-            if cache.roles.remove(id).is_none() {
+            if let Some(role) = cache.roles.remove(id) {
+                // Remove from name index
+                cache.role_name_index.remove(&role.name);
+            } else {
                 return Err(StorageError::RoleNotFound(id.to_string()));
             }
         }
@@ -317,6 +391,8 @@ impl StorageBackend for FileStorage {
     async fn store_api_key(&self, key: &ApiKey) -> Result<(), StorageError> {
         {
             let mut cache = self.cache.write();
+            // Update index
+            cache.api_key_hash_index.insert(key.key_hash.clone(), key.id.clone());
             cache.api_keys.insert(key.id.clone(), key.clone());
         }
 
@@ -325,7 +401,12 @@ impl StorageBackend for FileStorage {
 
     async fn get_api_key_by_hash(&self, hash: &str) -> Result<Option<ApiKey>, StorageError> {
         let cache = self.cache.read();
-        Ok(cache.api_keys.values().find(|k| k.key_hash == hash).cloned())
+        // O(1) lookup using index
+        if let Some(id) = cache.api_key_hash_index.get(hash) {
+            Ok(cache.api_keys.get(id).cloned())
+        } else {
+            Ok(None)
+        }
     }
 
     async fn list_api_keys(&self) -> Result<Vec<ApiKey>, StorageError> {
@@ -336,7 +417,10 @@ impl StorageBackend for FileStorage {
     async fn delete_api_key(&self, id: &str) -> Result<(), StorageError> {
         {
             let mut cache = self.cache.write();
-            if cache.api_keys.remove(id).is_none() {
+            if let Some(key) = cache.api_keys.remove(id) {
+                // Remove from hash index
+                cache.api_key_hash_index.remove(&key.key_hash);
+            } else {
                 return Err(StorageError::ApiKeyNotFound(id.to_string()));
             }
         }
