@@ -11,10 +11,9 @@ build-dir = "book"
 [output.html]
 default-theme = "light"
 preferred-dark-theme = "navy"
-git-repository-url = "https://github.com/vultrino/vultrino"
-edit-url-template = "https://github.com/vultrino/vultrino/edit/main/docs/{path}"
-site-url = "/vultrino/"
-cname = "docs.vultrino.dev"
+git-repository-url = "https://github.com/zachyking/vultrino"
+edit-url-template = "https://github.com/zachyking/vultrino/edit/main/docs/{path}"
+site-url = "/"
 
 [output.html.fold]
 enable = true
