@@ -110,6 +110,34 @@ enum Commands {
         /// OAuth2 refresh token (optional)
         #[arg(long)]
         refresh_token: Option<String>,
+
+        /// HMAC API key (for hmac_api_key type)
+        #[arg(long)]
+        hmac_key: Option<String>,
+
+        /// HMAC API secret (for hmac_api_key type, will prompt if not provided)
+        #[arg(long)]
+        hmac_secret: Option<String>,
+
+        /// HMAC header name (default: X-MBX-APIKEY)
+        #[arg(long, default_value = "X-MBX-APIKEY")]
+        hmac_header_name: String,
+
+        /// HMAC receive window in milliseconds (default: 5000)
+        #[arg(long, default_value = "5000")]
+        hmac_recv_window: u64,
+
+        /// ECDSA private key in hex (for ecdsa_key type, will prompt if not provided)
+        #[arg(long)]
+        private_key: Option<String>,
+
+        /// ECDSA API/main wallet address (optional, for agent wallet model)
+        #[arg(long)]
+        api_address: Option<String>,
+
+        /// Use testnet (for ecdsa_key type)
+        #[arg(long)]
+        testnet: bool,
     },
 
     /// List stored credentials
@@ -369,6 +397,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             token_url,
             scopes,
             refresh_token,
+            hmac_key,
+            hmac_secret,
+            hmac_header_name,
+            hmac_recv_window,
+            private_key,
+            api_address,
+            testnet,
         } => {
             add_credential(
                 config,
@@ -386,6 +421,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     token_url,
                     scopes,
                     refresh_token,
+                    hmac_key,
+                    hmac_secret,
+                    hmac_header_name,
+                    hmac_recv_window,
+                    private_key,
+                    api_address,
+                    testnet,
                 },
             )
             .await?;
@@ -661,6 +703,15 @@ struct AddCredentialArgs {
     token_url: Option<String>,
     scopes: Option<String>,
     refresh_token: Option<String>,
+    // HMAC API Key fields
+    hmac_key: Option<String>,
+    hmac_secret: Option<String>,
+    hmac_header_name: String,
+    hmac_recv_window: u64,
+    // ECDSA Key fields
+    private_key: Option<String>,
+    api_address: Option<String>,
+    testnet: bool,
 }
 
 /// Add a new credential
@@ -724,6 +775,43 @@ async fn add_credential(
                 expires_at: None,
                 token_url,
                 scopes: scopes_vec,
+            }
+        }
+        "hmac_api_key" => {
+            let api_key = args.hmac_key.ok_or("HMAC API key is required (--hmac-key)")?;
+            let api_secret = if let Some(s) = args.hmac_secret {
+                s
+            } else {
+                eprint!("Enter HMAC API secret: ");
+                io::stderr().flush()?;
+                rpassword::read_password()?
+            };
+            CredentialData::HmacApiKey {
+                api_key,
+                api_secret: Secret::new(api_secret),
+                header_name: args.hmac_header_name,
+                recv_window: args.hmac_recv_window,
+            }
+        }
+        "ecdsa_key" => {
+            let private_key = if let Some(k) = args.private_key {
+                k
+            } else {
+                eprint!("Enter private key (hex): ");
+                io::stderr().flush()?;
+                rpassword::read_password()?
+            };
+
+            // Validate hex format
+            let key_hex = private_key.strip_prefix("0x").unwrap_or(&private_key);
+            if key_hex.len() != 64 || !key_hex.chars().all(|c| c.is_ascii_hexdigit()) {
+                return Err("Private key must be 32 bytes (64 hex characters)".into());
+            }
+
+            CredentialData::EcdsaKey {
+                private_key: Secret::new(private_key),
+                api_address: args.api_address,
+                testnet: args.testnet,
             }
         }
         other => {

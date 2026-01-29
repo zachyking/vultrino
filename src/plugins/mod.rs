@@ -10,12 +10,16 @@
 //! local paths, or URLs.
 
 mod http;
+mod hmac;
+mod ecdsa;
 pub mod installer;
 pub mod loader;
 pub mod types;
 pub mod wasm;
 
 pub use http::HttpPlugin;
+pub use hmac::HmacPlugin;
+pub use ecdsa::EcdsaPlugin;
 pub use installer::PluginInstaller;
 pub use loader::{PluginLoader, PluginRegistryExt};
 pub use types::{
@@ -185,6 +189,8 @@ impl PluginRegistry {
 
         // Register default plugins
         registry.register(Arc::new(HttpPlugin::new()));
+        registry.register(Arc::new(HmacPlugin::new()));
+        registry.register(Arc::new(EcdsaPlugin::new()));
 
         registry
     }

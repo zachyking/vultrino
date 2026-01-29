@@ -240,6 +240,15 @@ pub struct CredentialForm {
     token_url: Option<String>,
     scopes: Option<String>,
     refresh_token: Option<String>,
+    // HMAC API Key fields
+    hmac_api_key: Option<String>,
+    hmac_api_secret: Option<String>,
+    hmac_header_name: Option<String>,
+    hmac_recv_window: Option<String>,
+    // ECDSA Key fields
+    ecdsa_private_key: Option<String>,
+    ecdsa_api_address: Option<String>,
+    ecdsa_testnet: Option<String>,
     // Plugin credential fields (dynamic)
     #[serde(flatten)]
     plugin_fields: HashMap<String, String>,
@@ -349,6 +358,54 @@ pub async fn credential_create(
                 expires_at: None,
                 token_url,
                 scopes,
+            }
+        }
+        "hmac_api_key" => {
+            let api_key = match form.hmac_api_key {
+                Some(k) if !k.is_empty() => k,
+                _ => {
+                    return render_credential_new_error_with_session(&session, auth, "API Key is required")
+                        .await
+                        .into_response();
+                }
+            };
+            let api_secret = match form.hmac_api_secret {
+                Some(s) if !s.is_empty() => s,
+                _ => {
+                    return render_credential_new_error_with_session(&session, auth, "API Secret is required")
+                        .await
+                        .into_response();
+                }
+            };
+            let header_name = form.hmac_header_name.unwrap_or_else(|| "X-MBX-APIKEY".to_string());
+            let recv_window: u64 = form
+                .hmac_recv_window
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(5000);
+
+            CredentialData::HmacApiKey {
+                api_key,
+                api_secret: Secret::new(api_secret),
+                header_name,
+                recv_window,
+            }
+        }
+        "ecdsa_key" => {
+            let private_key = match form.ecdsa_private_key {
+                Some(k) if !k.is_empty() => k,
+                _ => {
+                    return render_credential_new_error_with_session(&session, auth, "Private Key is required")
+                        .await
+                        .into_response();
+                }
+            };
+            let api_address = form.ecdsa_api_address.filter(|s| !s.is_empty());
+            let testnet = form.ecdsa_testnet.map(|s| s == "true" || s == "1" || s == "on").unwrap_or(false);
+
+            CredentialData::EcdsaKey {
+                private_key: Secret::new(private_key),
+                api_address,
+                testnet,
             }
         }
         cred_type if cred_type.starts_with("plugin:") => {

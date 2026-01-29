@@ -65,6 +65,10 @@ pub enum CredentialType {
     PrivateKey,
     /// Certificate for mTLS
     Certificate,
+    /// HMAC-signed API key (e.g., Binance, AsterDex)
+    HmacApiKey,
+    /// ECDSA private key for signing (e.g., Ethereum, Hyperliquid)
+    EcdsaKey,
     /// Custom credential type
     Custom(String),
 }
@@ -77,6 +81,8 @@ impl std::fmt::Display for CredentialType {
             CredentialType::BasicAuth => write!(f, "basic_auth"),
             CredentialType::PrivateKey => write!(f, "private_key"),
             CredentialType::Certificate => write!(f, "certificate"),
+            CredentialType::HmacApiKey => write!(f, "hmac_api_key"),
+            CredentialType::EcdsaKey => write!(f, "ecdsa_key"),
             CredentialType::Custom(name) => write!(f, "custom:{}", name),
         }
     }
@@ -185,6 +191,32 @@ pub enum CredentialData {
         key_pem: Secret,
     },
 
+    /// HMAC-signed API key (e.g., Binance, AsterDex)
+    HmacApiKey {
+        /// API key (sent in header)
+        api_key: String,
+        /// API secret (used for HMAC signing)
+        api_secret: Secret,
+        /// Header name for API key (default: "X-MBX-APIKEY")
+        #[serde(default = "default_hmac_header")]
+        header_name: String,
+        /// Receive window in milliseconds (default: 5000)
+        #[serde(default = "default_recv_window")]
+        recv_window: u64,
+    },
+
+    /// ECDSA private key for signing (e.g., Ethereum, Hyperliquid)
+    EcdsaKey {
+        /// Private key in hex (with/without 0x prefix)
+        private_key: Secret,
+        /// Optional main wallet address (for agent wallet model)
+        #[serde(skip_serializing_if = "Option::is_none")]
+        api_address: Option<String>,
+        /// Use testnet endpoints
+        #[serde(default)]
+        testnet: bool,
+    },
+
     /// Custom credential data
     Custom(HashMap<String, Secret>),
 }
@@ -197,6 +229,14 @@ fn default_bearer_prefix() -> String {
     "Bearer ".to_string()
 }
 
+fn default_hmac_header() -> String {
+    "X-MBX-APIKEY".to_string()
+}
+
+fn default_recv_window() -> u64 {
+    5000
+}
+
 impl CredentialData {
     /// Get the credential type for this data
     pub fn credential_type(&self) -> CredentialType {
@@ -206,6 +246,8 @@ impl CredentialData {
             CredentialData::BasicAuth { .. } => CredentialType::BasicAuth,
             CredentialData::PrivateKey { .. } => CredentialType::PrivateKey,
             CredentialData::Certificate { .. } => CredentialType::Certificate,
+            CredentialData::HmacApiKey { .. } => CredentialType::HmacApiKey,
+            CredentialData::EcdsaKey { .. } => CredentialType::EcdsaKey,
             CredentialData::Custom(_) => CredentialType::Custom("custom".to_string()),
         }
     }
