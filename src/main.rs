@@ -891,6 +891,12 @@ async fn run_web_server(config: Config, bind: String) -> Result<(), Box<dyn std:
 
     // Build the execution server once, with plugins loaded, and share it across
     // all JSON API requests (no per-request rebuild / plugin re-scan).
+    //
+    // Trade-off: plugins are scanned from disk once, at startup. A plugin
+    // installed via the CLI while this web server is already running is NOT
+    // picked up until the server is restarted (the previous per-request
+    // `load_plugins()` did pick it up, at the cost of a full WASM re-scan on
+    // every request). Restart the web server after `vultrino plugin install`.
     let resolver = CredentialResolver::new(storage.clone());
     let exec_server = VultrinoServer::new(config.clone(), storage.clone(), resolver);
     if let Err(e) = exec_server.load_plugins().await {
