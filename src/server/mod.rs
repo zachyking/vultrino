@@ -350,6 +350,34 @@ impl VultrinoServer {
                 ));
             }
 
+            // Bound the number of *pending* approvals a use token can open. Each
+            // open reserves a future use, so outstanding pending approvals plus
+            // already-consumed uses must not exceed max_uses — otherwise a
+            // single-use token could spawn an unbounded approval/notifier flood
+            // (only execution is fail-closed otherwise).
+            if let Some(token) = &exec_auth.use_token {
+                if let Some(max) = token.max_uses {
+                    let pending = self
+                        .storage
+                        .list_approvals()
+                        .await
+                        .unwrap_or_default()
+                        .into_iter()
+                        .filter(|a| {
+                            a.status == ApprovalStatus::Pending
+                                && !a.is_past_ttl()
+                                && a.use_token_id.as_deref() == Some(token.id.as_str())
+                        })
+                        .count() as u32;
+                    if token.uses + pending >= max {
+                        return Err(VultrinoError::PolicyDenied(
+                            "This use token has no remaining capacity for a new pending approval"
+                                .to_string(),
+                        ));
+                    }
+                }
+            }
+
             // Open an approval request. The use token is NOT consumed yet — it is
             // reserved when the approved action actually runs.
             let (approval, decision_token) = ApprovalRequest::open(NewApproval {
@@ -503,6 +531,20 @@ impl VultrinoServer {
         let (plugin_name, action_name) =
             parse_action(&approval.action).map_err(RunError::terminal)?;
         let context = RequestContext::new();
+
+        // Re-evaluate policy at execution time so the deferred path enforces the
+        // same hard gates (deny rules, rate limits) as the immediate path — a
+        // human approval is not a policy bypass. A `Prompt` here is already
+        // satisfied (the human approved), so it proceeds; only `Deny` blocks.
+        let url = approval.params.get("url").and_then(|v| v.as_str());
+        let method = approval.params.get("method").and_then(|v| v.as_str());
+        if let crate::policy::PolicyDecision::Deny(reason) =
+            self.policy_engine
+                .evaluate(&credential.alias, url, method, &context)
+        {
+            return Err(RunError::terminal(VultrinoError::PolicyDenied(reason)));
+        }
+
         self.run_action(
             credential,
             plugin_name,

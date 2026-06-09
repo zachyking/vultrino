@@ -394,6 +394,38 @@ async fn test_token_force_approval_consumes_on_resume() {
     assert!(after.is_exhausted());
 }
 
+/// A single-use require_approval token may have at most one *pending* approval
+/// outstanding — a second open is refused, so it can't flood the approval queue.
+#[tokio::test]
+async fn test_single_use_token_pending_approval_bounded() {
+    let (server, storage) = setup().await;
+    store_credential(&storage, "api-cred", false).await;
+
+    let (_full, token) = UseToken::create(NewUseToken {
+        name: "one-pending".to_string(),
+        credential_scope: "*".to_string(),
+        action_scope: None,
+        max_uses: Some(1),
+        require_approval: true,
+        expires_in: None,
+    });
+    storage.store_use_token(&token).await.unwrap();
+
+    // First open succeeds (one pending approval reserves the single use).
+    let first = server
+        .execute_gated(echo_request("api-cred"), ExecAuth::from_use_token(token.clone()))
+        .await
+        .unwrap();
+    assert!(matches!(first, ExecutionOutcome::Pending(_)));
+
+    // Second open is refused — no remaining capacity.
+    let err = server
+        .execute_gated(echo_request("api-cred"), ExecAuth::from_use_token(token.clone()))
+        .await
+        .unwrap_err();
+    assert!(format!("{}", err).to_lowercase().contains("no remaining capacity"));
+}
+
 #[tokio::test]
 async fn test_approval_expires_when_undecided() {
     let (server, storage) = setup().await;
