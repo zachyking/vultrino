@@ -3627,7 +3627,7 @@ dependencies = [
  "once_cell",
  "parking_lot",
  "proptest",
- "rand 0.8.7",
+ "rand 0.10.2",
  "regex",
  "reqwest",
  "rpassword",
